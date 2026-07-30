@@ -217,7 +217,92 @@ thread_local InferencePhase g_inference_phase = InferencePhase::Unknown;
 
 bool env_truthy_(const char *name) {
     const char *v = std::getenv(name);
-    return v != nullptr && v[0] != '\0' && std::string(v) != "0";
+    return v != nullptr && v[0] != '\0' && std::string(v) != "0"
+        && std::strcmp(v, "false") != 0 && std::strcmp(v, "no") != 0
+        && std::strcmp(v, "off") != 0;
+}
+
+void warn_once_(bool &flag, const char *msg) {
+    if (flag) {
+        return;
+    }
+    flag = true;
+    spdlog::warn("{}", msg);
+}
+
+/// Canonical ``INFINI_MOE_INGRAPH``: off | decode | prefill | both.
+/// Legacy FORCE_CAPTURE / TRITON_CAPTURE → decode (one release shim).
+enum class MoeIngraphMode : uint8_t { Off = 0, Decode, Prefill, Both };
+
+MoeIngraphMode moeIngraphMode_() {
+    const char *raw = std::getenv("INFINI_MOE_INGRAPH");
+    if (raw != nullptr && raw[0] != '\0') {
+        std::string s(raw);
+        for (char &c : s) {
+            if (c >= 'A' && c <= 'Z') {
+                c = static_cast<char>(c - 'A' + 'a');
+            }
+        }
+        if (s == "off" || s == "0" || s == "false" || s == "no") {
+            return MoeIngraphMode::Off;
+        }
+        if (s == "decode") {
+            return MoeIngraphMode::Decode;
+        }
+        if (s == "prefill") {
+            return MoeIngraphMode::Prefill;
+        }
+        if (s == "both") {
+            return MoeIngraphMode::Both;
+        }
+        static bool unknown_warned = false;
+        warn_once_(unknown_warned,
+                   "INFINI_MOE_INGRAPH has unknown value (expected "
+                   "off|decode|prefill|both); treating as off");
+        return MoeIngraphMode::Off;
+    }
+    // Legacy: FORCE_CAPTURE / TRITON_CAPTURE → Decode-only (preserve old semantics).
+    if (env_truthy_("INFINI_MOE_FORCE_CAPTURE")
+        || env_truthy_("INFINI_MOE_TRITON_CAPTURE")) {
+        static bool legacy_warned = false;
+        warn_once_(
+            legacy_warned,
+            "INFINI_MOE_FORCE_CAPTURE / INFINI_MOE_TRITON_CAPTURE are deprecated; "
+            "shim to INFINI_MOE_INGRAPH=decode. Prefer INFINI_MOE_INGRAPH="
+            "decode|prefill|both (+ INFINI_MOE_METAX_INGRAPH_UNSAFE=1 on MetaX)");
+        return MoeIngraphMode::Decode;
+    }
+    return MoeIngraphMode::Off;
+}
+
+bool metaxMoeIngraphUnsafe_() {
+#if defined(ENABLE_METAX_API)
+    if (env_truthy_("INFINI_MOE_METAX_INGRAPH_UNSAFE")) {
+        return true;
+    }
+    if (env_truthy_("INFINI_MOE_METAX_CAPTURE_UNSAFE")) {
+        static bool warned = false;
+        warn_once_(
+            warned,
+            "INFINI_MOE_METAX_CAPTURE_UNSAFE is deprecated; use "
+            "INFINI_MOE_METAX_INGRAPH_UNSAFE=1");
+        return true;
+    }
+    return false;
+#else
+    return true;
+#endif
+}
+
+void warnCaptureSafeIfSet_() {
+    if (!env_truthy_("INFINI_MOE_CAPTURE_SAFE")) {
+        return;
+    }
+    static bool warned = false;
+    warn_once_(
+        warned,
+        "INFINI_MOE_CAPTURE_SAFE is hard-removed (aten MoE body deleted Phase 1); "
+        "ignored. Use INFINI_MOE_INGRAPH + Triton, or host-break");
 }
 } // namespace
 
@@ -246,19 +331,23 @@ const char *cudagraphPolicy() {
 }
 
 bool faInGraphAllowed() {
-    // FORCE-only (not phase-adaptive). H3 REJECTED: iso
-    // (bench_results/dev_infinilm_fa_h3h4_*) shows eager mha_varlen OK after
-    // FA kvcache capture through the same adaptor — dual-entry is not the
-    // poison. Keep prod FA host-break; do not ship owning ATen / TLS fence as
-    // an H3 fix. FA-in-graph under true native full_and_piecewise may still
-    // fail for other reasons (hcGraph vs torch CG, full-model capture, MoE).
+    // Phase-agnostic diagnose GraphOp. Prod keeps FA host-break.
+    // Canonical: INFINI_FA_INGRAPH; legacy INFINI_FA_FORCE_CAPTURE shims one release.
+    if (env_truthy_("INFINI_FA_INGRAPH")) {
+        return true;
+    }
     if (env_truthy_("INFINI_FA_FORCE_CAPTURE")) {
+        static bool warned = false;
+        warn_once_(
+            warned,
+            "INFINI_FA_FORCE_CAPTURE is deprecated; use INFINI_FA_INGRAPH=1");
         return true;
     }
     return false;
 }
 
 bool moeTritonCaptureAllowed() {
+    warnCaptureSafeIfSet_();
     // Bisect escape: force MoE host-break even under Decode FULL capture.
     if (env_truthy_("INFINI_MOE_FORCE_HOST_BREAK")) {
         return false;
@@ -267,31 +356,21 @@ bool moeTritonCaptureAllowed() {
     if (std::strcmp(cudagraphPolicy(), "eager") == 0) {
         return false;
     }
-#if defined(ENABLE_METAX_API)
-    // MetaX: MoE under hcStream capture / hcGraph replay garbles (Gate C Cell B +
-    // 20260724 Band C FA_FORCE+MoE-in-graph segs=1). Step1 A/B (hyp_capture_body):
-    // FORCE+UNSAFE and CAPTURE_SAFE+UNSAFE both GARBLE with segs=1; FORCE_OP_LIST
-    // eager replay of the same 453-op list is OK → poison is hcGraph capture/replay
-    // of MoE-containing segments, not the eager MoE op sequence.
-    // H5 paged MAX_OPS (20260724 hyp_hcgraph_fix/maxops_paged): last_good N=34
-    // (through pre-MoE AddRMSNorm; Mul@31 OK in-graph); first_bad N=35 folds
-    // first InductorMoe@34 into GraphExec → GARBLE/crash.
-    // H7 (20260724 session 961725): root cause was unreained torch
-    // ``contiguous()`` of bucket-padded MoE ``x`` under hcStream capture;
-    // CaptureArena materialize of ``x`` makes paged FORCE+UNSAFE segs=1
-    // token-exact. Keep HostOp/tail Graph::run sync for HB races. Prod still
-    // requires INFINI_MOE_METAX_CAPTURE_UNSAFE=1 to fold MoE into device graphs
-    // (wall not auto-relaxed). Production MetaX FULL correctness path without
-    // UNSAFE: MoE host-break (segs≈28).
-    if (!env_truthy_("INFINI_MOE_METAX_CAPTURE_UNSAFE")) {
+    // MetaX wall: MoE-in-graph remains unsafe-by-default (hcGraph garble history).
+    if (!metaxMoeIngraphUnsafe_()) {
         return false;
     }
-#endif
-    // Diagnose-only Decode fold: FORCE_CAPTURE (TRITON_CAPTURE is a deprecated
-    // alias). Prefill stays host-break. MetaX also needs METAX_CAPTURE_UNSAFE.
-    if (env_truthy_("INFINI_MOE_FORCE_CAPTURE") ||
-        env_truthy_("INFINI_MOE_TRITON_CAPTURE")) {
-        return getInferencePhase() == InferencePhase::Decode;
+    const MoeIngraphMode mode = moeIngraphMode_();
+    const InferencePhase phase = getInferencePhase();
+    switch (mode) {
+    case MoeIngraphMode::Off:
+        return false;
+    case MoeIngraphMode::Decode:
+        return phase == InferencePhase::Decode;
+    case MoeIngraphMode::Prefill:
+        return phase == InferencePhase::Prefill;
+    case MoeIngraphMode::Both:
+        return phase == InferencePhase::Prefill || phase == InferencePhase::Decode;
     }
     return false;
 }

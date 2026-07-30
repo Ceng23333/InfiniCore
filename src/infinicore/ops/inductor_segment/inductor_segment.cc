@@ -53,42 +53,15 @@ size_t recording_valid_seq_len(size_t bucket) {
     return bucket;
 }
 
-/// Deprecated: ``INFINI_MOE_CAPTURE_SAFE`` no longer selects an aten MoE body
-/// (Phase 1). Truthy values are ignored with a one-shot stderr warning.
-bool moe_capture_safe_deprecated_set() {
-    const char *v = std::getenv("INFINI_MOE_CAPTURE_SAFE");
-    if (v == nullptr || v[0] == '\0' || std::string(v) == "0") {
-        return false;
-    }
-    static bool warned = false;
-    if (!warned) {
-        warned = true;
-        fprintf(stderr,
-                "[InductorMoe] INFINI_MOE_CAPTURE_SAFE is deprecated (aten "
-                "index_select+bmm capture escape removed). Use FORCE_CAPTURE + "
-                "Triton fused_moe_routed, or host-break. Ignoring.\n");
-    }
-    return true;
-}
-
-/// Triton fused_moe_routed under MetaX stream capture (no aten body).
-/// Capture follows ``moeTritonCaptureAllowed()``: FORCE-only
-/// (``INFINI_MOE_FORCE_CAPTURE``); ``INFINI_MOE_FORCE_HOST_BREAK=1`` forces host-break.
+/// Triton fused_moe_routed under stream capture (no aten body).
+/// Capture follows ``moeTritonCaptureAllowed()`` (``INFINI_MOE_INGRAPH`` phase
+/// allow-list + MetaX ``METAX_INGRAPH_UNSAFE`` wall; legacy FORCE/TRITON → decode).
 bool moe_triton_capture_enabled() {
     return infinicore::context::moeTritonCaptureAllowed();
 }
 
-/// MoE may enter device capture (phase-adaptive Triton under FORCE_CAPTURE).
+/// MoE may enter a device segment (same gate as ``moeTritonCaptureAllowed``).
 bool moe_device_capturable() {
-    // Surface deprecated CAPTURE_SAFE once (no aten body, does not enable capture).
-    (void)moe_capture_safe_deprecated_set();
-#if defined(ENABLE_METAX_API)
-    // MetaX wall: any in-graph MoE fold needs INFINI_MOE_METAX_CAPTURE_UNSAFE=1.
-    const char *unsafe = std::getenv("INFINI_MOE_METAX_CAPTURE_UNSAFE");
-    if (unsafe == nullptr || unsafe[0] == '\0' || std::string(unsafe) == "0") {
-        return false;
-    }
-#endif
     return moe_triton_capture_enabled();
 }
 
@@ -1311,9 +1284,9 @@ InductorMoe::InductorMoe(
         out,
         layer_idx,
         bucket);
-    // CG-1 default: Triton fused_moe_routed is not stream-capture-safe → host break
-    // unless FORCE capture (Jul21 Triton-under-capture). CAPTURE_SAFE aten removed.
-    // INFINI_MOE_FORCE_HOST_BREAK=1 forces host-break even if FORCE_CAPTURE is set.
+    // Default: Triton MoE host-break unless ``moe_device_capturable()``
+    // (INFINI_MOE_INGRAPH phase allow-list + MetaX METAX_INGRAPH_UNSAFE).
+    // INFINI_MOE_FORCE_HOST_BREAK=1 forces host-break.
     host_break_ = !moe_device_capturable();
 }
 
@@ -1330,10 +1303,10 @@ void InductorMoe::execute(
         if (context::isDeviceStreamCapturing() && !moe_device_capturable()) {
             throw std::runtime_error(
                 "InductorMoe: refusing AOTI+Triton MoE under hcStream capture "
-                "(need InferencePhase::Decode + INFINI_MOE_FORCE_CAPTURE (+ MetaX "
-                "INFINI_MOE_METAX_CAPTURE_UNSAFE), or use host-break; "
-                "INFINI_MOE_FORCE_HOST_BREAK=1 forces host-break). "
-                "INFINI_MOE_CAPTURE_SAFE aten body is removed.");
+                "(need INFINI_MOE_INGRAPH=decode|prefill|both matching "
+                "InferencePhase (+ MetaX INFINI_MOE_METAX_INGRAPH_UNSAFE), or "
+                "use host-break; INFINI_MOE_FORCE_HOST_BREAK=1 forces "
+                "host-break).");
         }
         const size_t valid_len = resolve_valid_seq_len(bucket, hidden_states);
         run_moe_segment(hidden_states, out, layer_idx, bucket, valid_len);
@@ -1412,8 +1385,8 @@ void moe_run(void *planned_meta) {
         throw std::runtime_error(
             "InductorMoe::run: AOTI+Triton MoE must not run under hcStream capture "
             "(recorded as host_break; Graph splits device segments around MoE). "
-            "Need InferencePhase::Decode + INFINI_MOE_FORCE_CAPTURE for Triton body "
-            "(INFINI_MOE_CAPTURE_SAFE aten body removed Phase 1).");
+            "Need INFINI_MOE_INGRAPH matching InferencePhase (+ MetaX "
+            "INFINI_MOE_METAX_INGRAPH_UNSAFE) for Triton body.");
     }
     auto *meta = reinterpret_cast<MoePlannedMeta *>(planned_meta);
     if (meta == nullptr) {

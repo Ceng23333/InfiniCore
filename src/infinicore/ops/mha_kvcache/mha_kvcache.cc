@@ -19,8 +19,8 @@ MhaKVCache::MhaKVCache(Tensor out,
                                  out, q, k_cache, v_cache, seqlens_k, block_table, alibi_slopes, scale);
     // MetaX FA2 mha_fwd_kvcache is not stream-capture-safe by default (HTC under
     // hcStreamBeginCapture). Production keeps FA host_break_; in-graph is
-    // FORCE-only via INFINI_FA_FORCE_CAPTURE (faInGraphAllowed is not
-    // phase-adaptive). H4: host_break only skips hcStreamBeginCapture — HostOp
+    // diagnose-only via INFINI_FA_INGRAPH (faInGraphAllowed; legacy
+    // FA_FORCE_CAPTURE shim). H4: host_break only skips hcStreamBeginCapture — HostOp
     // still runs mha_kvcache_flashattn::run via non-owning to_aten_tensor
     // (from_blob); not a vLLM FX “attn outside torch graph” split.
     host_break_ = !context::faInGraphAllowed();
