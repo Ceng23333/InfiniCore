@@ -23,6 +23,10 @@ namespace infinicore::graph {
 /// ``c10::cuda::MemPool``. Torch tensors are aliases (``from_blob`` / no-op
 /// deleter) on InfiniCore-owned pointers when allocated via ``empty`` /
 /// ``empty_aten``.
+///
+/// M3 note: sharing one CaptureArena across segments caused silent MetaX ATU
+/// mid-InductorMoe (2026-07-30). MoE scratch is shared at the Python
+/// ``_RoutedWorkspace`` layer instead (one max-sized bank, prefix views).
 class CaptureArena {
 public:
     CaptureArena() = default;
