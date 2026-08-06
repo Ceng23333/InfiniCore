@@ -330,18 +330,58 @@ const char *cudagraphPolicy() {
     return "";
 }
 
-bool faInGraphAllowed() {
-    // Phase-agnostic diagnose GraphOp. Prod keeps FA host-break.
-    // Canonical: INFINI_FA_INGRAPH; legacy INFINI_FA_FORCE_CAPTURE shims one release.
-    if (env_truthy_("INFINI_FA_INGRAPH")) {
-        return true;
+/// Canonical ``INFINI_FA_INGRAPH``: off | decode | both.
+/// Truthy ``1`` / ``on`` / ``true`` / ``yes`` → both (legacy diagnose).
+/// Legacy ``INFINI_FA_FORCE_CAPTURE`` → both (one release shim).
+enum class FaIngraphMode : uint8_t { Off = 0, Decode, Both };
+
+FaIngraphMode faIngraphMode_() {
+    const char *raw = std::getenv("INFINI_FA_INGRAPH");
+    if (raw != nullptr && raw[0] != '\0') {
+        std::string s(raw);
+        for (char &c : s) {
+            if (c >= 'A' && c <= 'Z') {
+                c = static_cast<char>(c - 'A' + 'a');
+            }
+        }
+        if (s == "off" || s == "0" || s == "false" || s == "no") {
+            return FaIngraphMode::Off;
+        }
+        if (s == "decode") {
+            return FaIngraphMode::Decode;
+        }
+        if (s == "both" || s == "1" || s == "true" || s == "yes" || s == "on") {
+            return FaIngraphMode::Both;
+        }
+        static bool unknown_warned = false;
+        warn_once_(unknown_warned,
+                   "INFINI_FA_INGRAPH has unknown value (expected "
+                   "off|decode|both); treating as off");
+        return FaIngraphMode::Off;
     }
     if (env_truthy_("INFINI_FA_FORCE_CAPTURE")) {
         static bool warned = false;
         warn_once_(
             warned,
-            "INFINI_FA_FORCE_CAPTURE is deprecated; use INFINI_FA_INGRAPH=1");
-        return true;
+            "INFINI_FA_FORCE_CAPTURE is deprecated; use "
+            "INFINI_FA_INGRAPH=decode (product) or both/1 (Prefill+Decode)");
+        return FaIngraphMode::Both;
+    }
+    return FaIngraphMode::Off;
+}
+
+bool faInGraphAllowed() {
+    // Phase allow-list via INFINI_FA_INGRAPH (mirror moeTritonCaptureAllowed).
+    // Product full_and_piecewise defaults to decode (FULL segs≈1; prefill FA HB).
+    const FaIngraphMode mode = faIngraphMode_();
+    const InferencePhase phase = getInferencePhase();
+    switch (mode) {
+    case FaIngraphMode::Off:
+        return false;
+    case FaIngraphMode::Decode:
+        return phase == InferencePhase::Decode;
+    case FaIngraphMode::Both:
+        return phase == InferencePhase::Prefill || phase == InferencePhase::Decode;
     }
     return false;
 }

@@ -43,6 +43,17 @@ protected:
 
 class Graph {
 public:
+    /// Split of the most recent ``run()`` wall (ms). Zeroed when profile off.
+    struct LastRunProfile {
+        double launch_ms{0.0};     ///< sum of ``infinirtGraphLuanch`` walls
+        double tail_sync_ms{0.0};  ///< mandatory end ``syncStream`` (0 if skipped)
+        double hostop_ms{0.0};     ///< HostOp steps (+ host-break sync before them)
+        double op_list_ms{0.0};    ///< DeviceSegment op-list / FORCE_OP_LIST / fallback
+        bool used_device{false};
+        bool skipped_tail_sync{false};
+        bool forced_op_list{false};
+    };
+
     Graph();
     ~Graph();
 
@@ -59,6 +70,10 @@ public:
 
     /// True iff the most recent ``run()`` with a device exec used ``hcGraphLaunch``.
     bool last_replay_used_device() const;
+
+    /// Most recent ``run()`` split timers (see ``INFINI_GRAPH_RUN_PROFILE`` /
+    /// ``INFINI_RANK_WORKER_PROFILE``).
+    const LastRunProfile &last_run_profile() const;
 
     uint64_t replay_device_ok() const;
     uint64_t replay_op_list_fallback() const;
@@ -93,6 +108,7 @@ private:
     void capture_device_segment_(ReplayStep &step);
 
     mutable bool last_replay_used_device_{false};
+    mutable LastRunProfile last_run_profile_{};
     mutable uint64_t replay_device_ok_{0};
     mutable uint64_t replay_op_list_fallback_{0};
 };

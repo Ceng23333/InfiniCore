@@ -68,8 +68,8 @@ void setDeviceStreamCapturing(bool capturing);
 graph::CaptureArena *currentCaptureArena();
 void setCurrentCaptureArena(graph::CaptureArena *arena);
 
-/// Engine TLS inference phase for phase-scoped MoE capture policy.
-/// FA (``faInGraphAllowed``) is phase-agnostic; MoE uses ``INFINI_MOE_INGRAPH``.
+/// Engine TLS inference phase for phase-scoped MoE / FA capture policy.
+/// FA uses ``INFINI_FA_INGRAPH``; MoE uses ``INFINI_MOE_INGRAPH``.
 enum class InferencePhase : uint8_t {
     Unknown = 0,
     Prefill = 1,
@@ -83,9 +83,11 @@ InferencePhase getInferencePhase();
 /// Unknown values (including ``track_b``) are treated as empty / legacy.
 const char *cudagraphPolicy();
 
-/// FA may enter a device segment: diagnose ``INFINI_FA_INGRAPH=1``
-/// (legacy alias ``INFINI_FA_FORCE_CAPTURE``). Phase-agnostic GraphOp.
-/// Prod / default → host-break.
+/// FA may enter a device segment — phase allow-list via ``INFINI_FA_INGRAPH``
+/// (``off`` | ``decode`` | ``both``; truthy ``1`` → ``both``; default ``off``).
+/// Product ``full_and_piecewise`` defaults to ``decode`` (FULL decode segs≈1;
+/// prefill FA stays host-break). Legacy ``INFINI_FA_FORCE_CAPTURE`` → ``both``.
+/// Kill-switch: ``0`` / ``off``.
 bool faInGraphAllowed();
 
 /// Triton MoE under stream capture — phase allow-list via ``INFINI_MOE_INGRAPH``

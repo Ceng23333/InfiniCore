@@ -3,9 +3,11 @@
 #include "../utils.hpp"
 #include "infinicore/context/context.hpp"
 #include "infinicore/graph/capture_arena.hpp"
+#include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
-#include <algorithm>
+#include <iostream>
 #include <infinirt.h>
 #include <sstream>
 #include <string>
@@ -87,6 +89,69 @@ infinirtStreamCaptureMode_t graph_capture_mode() {
     throw std::runtime_error(msg);
 }
 
+bool graph_force_op_list_enabled() {
+    const char *v = std::getenv("INFINI_GRAPH_FORCE_OP_LIST");
+    return v != nullptr && v[0] != '\0' && std::string(v) != "0";
+}
+
+/// Runtime-only: keep GraphExec capture, but Graph::run uses recorded op-list
+/// (A/B vs GraphExec without skipping capture / audit).
+/// INFINI_GRAPH_REPLAY_OP_LIST is soft-deprecated; prefer true GraphExec.
+/// Emergency skip GraphExec: INFINI_GRAPH_FORCE_OP_LIST=1.
+bool graph_replay_op_list_enabled() {
+    const char *v = std::getenv("INFINI_GRAPH_REPLAY_OP_LIST");
+    if (v != nullptr && v[0] != '\0' && std::string(v) != "0") {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            std::cerr
+                << "[infinicore] WARN: INFINI_GRAPH_REPLAY_OP_LIST is deprecated "
+                   "(op-list run ≈ eager MoE under InductorMoe-in-graph; prefer "
+                   "true GraphExec). Emergency kill-switch: "
+                   "INFINI_GRAPH_FORCE_OP_LIST=1\n";
+        }
+        return true;
+    }
+    return graph_force_op_list_enabled();
+}
+
+/// Skip Graph::run end syncStream (caller must drain before logits / D2H).
+/// Bisect: INFINI_GRAPH_SKIP_TAIL_SYNC=1 (Gate C: keep one drain before read).
+bool graph_skip_tail_sync_enabled() {
+    const char *v = std::getenv("INFINI_GRAPH_SKIP_TAIL_SYNC");
+    return v != nullptr && v[0] != '\0' && std::string(v) != "0";
+}
+
+/// Split launch / tail_sync / hostop timers. Also on when RANK_WORKER_PROFILE=1.
+bool graph_run_profile_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *g = std::getenv("INFINI_GRAPH_RUN_PROFILE");
+        if (g != nullptr && g[0] != '\0' && std::string(g) != "0") {
+            cached = 1;
+        } else {
+            const char *rw = std::getenv("INFINI_RANK_WORKER_PROFILE");
+            cached = (rw != nullptr && rw[0] == '1' && rw[1] == '\0') ? 1 : 0;
+        }
+    }
+    return cached == 1;
+}
+
+/// Compact ``graph_run_profile:`` line (opt-in; RANK_WORKER embeds splits instead).
+bool graph_run_profile_log_enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *g = std::getenv("INFINI_GRAPH_RUN_PROFILE");
+        cached = (g != nullptr && g[0] != '\0' && std::string(g) != "0") ? 1 : 0;
+    }
+    return cached == 1;
+}
+
+double graph_monotonic_ms() {
+    using clock = std::chrono::steady_clock;
+    return std::chrono::duration<double, std::milli>(clock::now().time_since_epoch()).count();
+}
+
 } // namespace
 
 /* =========================
@@ -160,8 +225,17 @@ Graph::Graph() {
 }
 
 void Graph::run() const {
+    last_run_profile_ = LastRunProfile{};
+    const bool profile = graph_run_profile_enabled();
+    const bool force_op_list = graph_replay_op_list_enabled();
+    last_run_profile_.forced_op_list = force_op_list;
+
     if (replay_steps_.empty()) {
+        const double t0 = profile ? graph_monotonic_ms() : 0.0;
         run_op_list_();
+        if (profile) {
+            last_run_profile_.op_list_ms = graph_monotonic_ms() - t0;
+        }
         last_replay_used_device_ = false;
         return;
     }
@@ -174,16 +248,38 @@ void Graph::run() const {
             // Host MoE (and other HB ops) must see prior device-segment outputs.
             // Host-topk D2H used to imply a sync; aten MoE under FORCE_CAPTURE does
             // not — without this, segs≈28 races and garbles (post-fix19: all-118).
+            const double t_h0 = profile ? graph_monotonic_ms() : 0.0;
             if (device_launched_since_sync) {
                 infinicore::context::syncStream();
                 device_launched_since_sync = false;
             }
             run_ops_(step.ops);
+            if (profile) {
+                last_run_profile_.hostop_ms += graph_monotonic_ms() - t_h0;
+            }
             ++step_i;
             continue;
         }
-        if (step.device != nullptr && step.device->exec != nullptr) {
-            if (infinirtGraphLuanch(step.device->exec, context::getStream()) == INFINI_STATUS_SUCCESS) {
+        // Runtime FORCE_OP_LIST: same recorded GraphOperators, no hcGraphLaunch
+        // (also covers capture-time FORCE_OP_LIST where exec was never built).
+        if (force_op_list
+            || step.device == nullptr
+            || step.device->exec == nullptr) {
+            const double t_o0 = profile ? graph_monotonic_ms() : 0.0;
+            run_ops_(step.ops);
+            if (profile) {
+                last_run_profile_.op_list_ms += graph_monotonic_ms() - t_o0;
+            }
+            ++step_i;
+            continue;
+        }
+        {
+            const double t_l0 = profile ? graph_monotonic_ms() : 0.0;
+            const auto st = infinirtGraphLuanch(step.device->exec, context::getStream());
+            if (profile) {
+                last_run_profile_.launch_ms += graph_monotonic_ms() - t_l0;
+            }
+            if (st == INFINI_STATUS_SUCCESS) {
                 ++replay_device_ok_;
                 used_device = true;
                 device_launched_since_sync = true;
@@ -193,33 +289,63 @@ void Graph::run() const {
                 if (cap_n > 0 && cap_n < step.ops.size()) {
                     infinicore::context::syncStream();
                     device_launched_since_sync = false;
+                    const double t_o0 = profile ? graph_monotonic_ms() : 0.0;
                     for (size_t i = cap_n; i < step.ops.size(); ++i) {
                         step.ops[i]->run();
+                    }
+                    if (profile) {
+                        last_run_profile_.op_list_ms += graph_monotonic_ms() - t_o0;
                     }
                 }
                 ++step_i;
                 continue;
             }
-            ++replay_op_list_fallback_;
-            spdlog::warn("hcGraphLaunch replay failed; falling back to op-list segment");
-            if (graph_strict_replay_enabled()) {
-                throw std::runtime_error("hcGraphLaunch replay failed (INFINI_GRAPH_STRICT_REPLAY=1)");
-            }
-            run_ops_(step.ops);
-            ++step_i;
-            continue;
         }
-        run_ops_(step.ops);
+        ++replay_op_list_fallback_;
+        spdlog::warn("hcGraphLaunch replay failed; falling back to op-list segment");
+        if (graph_strict_replay_enabled()) {
+            throw std::runtime_error("hcGraphLaunch replay failed (INFINI_GRAPH_STRICT_REPLAY=1)");
+        }
+        {
+            const double t_o0 = profile ? graph_monotonic_ms() : 0.0;
+            run_ops_(step.ops);
+            if (profile) {
+                last_run_profile_.op_list_ms += graph_monotonic_ms() - t_o0;
+            }
+        }
         ++step_i;
     }
     // Gate C / MetaX: monolithic FULL (segs=1, MoE in-graph) has no HostOp
     // MoE D2H sync points. hcGraphLaunch is async — without a stream sync,
     // logits are read while the graph is still in flight → deterministic garble
     // (Cell B). Host-break MoE (segs≈28) accidentally synchronized via topk D2H.
+    // Prefill TP=1 bisect: INFINI_GRAPH_SKIP_TAIL_SYNC=1 defers drain to the
+    // caller (must sync before logits / sample D2H).
     if (used_device && device_launched_since_sync) {
-        infinicore::context::syncStream();
+        if (graph_skip_tail_sync_enabled()) {
+            last_run_profile_.skipped_tail_sync = true;
+        } else {
+            const double t_s0 = profile ? graph_monotonic_ms() : 0.0;
+            infinicore::context::syncStream();
+            if (profile) {
+                last_run_profile_.tail_sync_ms += graph_monotonic_ms() - t_s0;
+            }
+        }
     }
     last_replay_used_device_ = used_device;
+    last_run_profile_.used_device = used_device;
+    if (graph_run_profile_log_enabled()) {
+        spdlog::info(
+            "graph_run_profile: launch_ms={:.3f} tail_sync_ms={:.3f} hostop_ms={:.3f} "
+            "op_list_ms={:.3f} used_device={} skip_tail={} force_op_list={}",
+            last_run_profile_.launch_ms,
+            last_run_profile_.tail_sync_ms,
+            last_run_profile_.hostop_ms,
+            last_run_profile_.op_list_ms,
+            used_device ? 1 : 0,
+            last_run_profile_.skipped_tail_sync ? 1 : 0,
+            force_op_list ? 1 : 0);
+    }
 }
 
 bool Graph::has_device_exec() const {
@@ -258,6 +384,10 @@ std::string Graph::device_graph_log() const {
 
 bool Graph::last_replay_used_device() const {
     return last_replay_used_device_;
+}
+
+const Graph::LastRunProfile &Graph::last_run_profile() const {
+    return last_run_profile_;
 }
 
 uint64_t Graph::replay_device_ok() const {
@@ -311,14 +441,13 @@ void Graph::capture_device_segment_(ReplayStep &step) {
     // with 453 ops including InductorMoe; same recipe without FORCE_OP_LIST
     // (hcGraph segs=1) → Cell-B GARBLE. MoE-in-graph op sequence is fine; MetaX
     // hcGraph capture/replay of the monolithic MoE-containing segment is poison.
-    if (const char *fol = std::getenv("INFINI_GRAPH_FORCE_OP_LIST")) {
-        if (fol[0] != '\0' && std::string(fol) != "0") {
-            spdlog::warn(
-                "[capture_audit] FORCE_OP_LIST=1: skip device capture ({} ops); "
-                "eager op-list replay",
-                step.ops.size());
-            return;
-        }
+    // Runtime FORCE_OP_LIST in Graph::run also skips GraphExec when exec exists.
+    if (graph_force_op_list_enabled()) {
+        spdlog::warn(
+            "[capture_audit] FORCE_OP_LIST=1: skip device capture ({} ops); "
+            "eager op-list replay",
+            step.ops.size());
+        return;
     }
 
     const bool audit = graph_capture_audit_enabled();
