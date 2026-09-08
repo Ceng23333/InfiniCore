@@ -60,6 +60,13 @@ inline hcclComm_t getHcclComm(infinicclComm_t comm) {
 
 namespace infiniccl::metax {
 
+infiniStatus_t getCommName(
+    infinicclComm_t comm,
+    char *comm_name,
+    size_t comm_name_size) {
+    return getCommNameFromHandle(comm, comm_name, comm_name_size);
+}
+
 infiniStatus_t commInitAll(
     infinicclComm_t *comms,
     int ndevice,
@@ -97,4 +104,5 @@ infiniStatus_t allReduce(
 
     return INFINI_STATUS_SUCCESS;
 }
+INFINICCL_DEVICE_API_UNSUPPORTED_EP_COLLECTIVES();
 } // namespace infiniccl::metax

@@ -54,6 +54,10 @@ void Runtime::syncDevice() {
     INFINICORE_CHECK_ERROR(infinirtDeviceSynchronize());
 }
 
+void Runtime::trimMemory() {
+    device_memory_allocator_->trim();
+}
+
 std::shared_ptr<Memory> Runtime::allocateMemory(size_t size) {
     std::byte *data_ptr = device_memory_allocator_->allocate(size);
     return std::make_shared<Memory>(
@@ -78,12 +82,24 @@ std::shared_ptr<Memory> Runtime::allocatePinnedHostMemory(size_t size) {
 }
 
 std::shared_ptr<Memory> Runtime::reinstantiateBlob(std::shared_ptr<Memory> blob) {
-    device_memory_allocator_.get()->mark_in_use_(blob->data(), true);
-    return std::make_shared<Memory>(
+    std::lock_guard<std::mutex> lock(reinstantiated_blob_mutex_);
+
+    auto ptr = blob->data();
+    auto it = reinstantiated_blobs_.find(ptr);
+    if (it != reinstantiated_blobs_.end()) {
+        if (auto memory = it->second.lock()) {
+            return memory;
+        }
+    }
+
+    device_memory_allocator_.get()->mark_in_use_(ptr, true);
+    auto memory = std::make_shared<Memory>(
         blob->data(), blob->size(), device_,
         [alloc = device_memory_allocator_.get()](std::byte *p) {
             alloc->deallocate(p);
         });
+    reinstantiated_blobs_[ptr] = memory;
+    return memory;
 }
 
 void Runtime::memcpyH2D(void *dst, const void *src, size_t size, bool async) {
@@ -95,6 +111,9 @@ void Runtime::memcpyH2D(void *dst, const void *src, size_t size, bool async) {
 }
 
 void Runtime::memcpyD2H(void *dst, const void *src, size_t size) {
+    if (device_.getType() == Device::Type::CAMBRICON) {
+        syncStream();
+    }
     INFINICORE_CHECK_ERROR(infinirtMemcpy(dst, src, size, INFINIRT_MEMCPY_D2H));
 }
 
@@ -104,6 +123,14 @@ void Runtime::memcpyD2D(void *dst, const void *src, size_t size, bool async) {
     } else {
         INFINICORE_CHECK_ERROR(infinirtMemcpy(dst, src, size, INFINIRT_MEMCPY_D2D));
     }
+}
+
+void Runtime::setDeviceMemory(void *ptr, int value, size_t count) {
+    INFINICORE_CHECK_ERROR(infinirtMemset(ptr, value, count));
+}
+
+void Runtime::setDeviceMemoryAsync(void *ptr, int value, size_t count, infinirtStream_t stream) {
+    INFINICORE_CHECK_ERROR(infinirtMemsetAsync(ptr, value, count, stream));
 }
 
 // Timing method implementations
@@ -168,9 +195,19 @@ void Runtime::addGraphOperator(std::shared_ptr<graph::GraphOperator> op) {
 }
 
 std::shared_ptr<graph::Graph> Runtime::stopGraphRecording() {
-    auto graph = graph_manager_->stop_recording();
+    try {
+        auto graph = graph_manager_->stop_recording();
+        device_memory_allocator_->set_pin_mode(false);
+        return graph;
+    } catch (...) {
+        device_memory_allocator_->set_pin_mode(false);
+        throw;
+    }
+}
+
+void Runtime::cancelGraphRecording() {
+    graph_manager_->cancel_recording();
     device_memory_allocator_->set_pin_mode(false);
-    return graph;
 }
 
 std::string Runtime::toString() const {

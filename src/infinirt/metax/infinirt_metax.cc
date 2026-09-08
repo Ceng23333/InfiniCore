@@ -1,5 +1,6 @@
 #include "infinirt_metax.h"
 #include "../../utils.h"
+#include <cstring>
 #ifdef ENABLE_METAX_MC_API
 #include <mcr/mc_runtime.h>
 #include <mcr/mc_runtime_api.h>
@@ -98,6 +99,57 @@ infiniStatus_t eventElapsedTime(float *ms_ptr, infinirtEvent_t start, infinirtEv
     return INFINI_STATUS_SUCCESS;
 }
 
+infiniStatus_t getMemInfo(int device_id, size_t *free_bytes, size_t *total_bytes) {
+    if (free_bytes == nullptr || total_bytes == nullptr) {
+        return INFINI_STATUS_NULL_POINTER;
+    }
+
+    int previous_device = 0;
+    CHECK_MACART(hcGetDevice(&previous_device));
+
+    if (previous_device != device_id) {
+        CHECK_MACART(hcSetDevice(device_id));
+    }
+
+    auto query_status = hcMemGetInfo(free_bytes, total_bytes);
+
+    if (previous_device != device_id) {
+        auto restore_status = hcSetDevice(previous_device);
+        if (query_status != hcSuccess) {
+            return INFINI_STATUS_INTERNAL_ERROR;
+        }
+        if (restore_status != hcSuccess) {
+            return INFINI_STATUS_INTERNAL_ERROR;
+        }
+    } else if (query_status != hcSuccess) {
+        return INFINI_STATUS_INTERNAL_ERROR;
+    }
+
+    return INFINI_STATUS_SUCCESS;
+}
+
+infiniStatus_t getDeviceResourceSnapshot(int device_id, infinirtDeviceResourceSnapshot_t *snapshot) {
+    if (snapshot == nullptr) {
+        return INFINI_STATUS_NULL_POINTER;
+    }
+
+    std::memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->device_id = device_id;
+    snapshot->device_type = INFINI_DEVICE_METAX;
+
+    auto status = getMemInfo(device_id, &snapshot->free_bytes, &snapshot->total_bytes);
+    if (status != INFINI_STATUS_SUCCESS) {
+        return status;
+    }
+
+    if (snapshot->total_bytes >= snapshot->free_bytes) {
+        snapshot->used_bytes = snapshot->total_bytes - snapshot->free_bytes;
+    }
+    snapshot->valid_fields |= INFINIRT_RESOURCE_FIELD_MEMORY_CAPACITY;
+
+    return INFINI_STATUS_SUCCESS;
+}
+
 infiniStatus_t mallocDevice(void **p_ptr, size_t size) {
     CHECK_MACART(hcMalloc(p_ptr, size));
     return INFINI_STATUS_SUCCESS;
@@ -150,6 +202,16 @@ infiniStatus_t mallocAsync(void **p_ptr, size_t size, infinirtStream_t stream) {
 
 infiniStatus_t freeAsync(void *ptr, infinirtStream_t stream) {
     CHECK_MACART(hcFreeAsync(ptr, (hcStream_t)stream));
+    return INFINI_STATUS_SUCCESS;
+}
+
+infiniStatus_t memsetDevice(void *ptr, int value, size_t count) {
+    CHECK_MACART(hcMemset(ptr, value, count));
+    return INFINI_STATUS_SUCCESS;
+}
+
+infiniStatus_t memsetDeviceAsync(void *ptr, int value, size_t count, infinirtStream_t stream) {
+    CHECK_MACART(hcMemsetAsync(ptr, value, count, (hcStream_t)stream));
     return INFINI_STATUS_SUCCESS;
 }
 

@@ -55,6 +55,10 @@
 
 namespace op::elementwise {
 
+// Low-rank tensor metadata is small enough to pass directly as CUDA/HIP kernel
+// arguments. This avoids an H2D metadata copy on every elementwise invocation.
+constexpr size_t INLINE_META_MAX_NDIM = 4;
+
 /**
  * @brief Stores the metadata required for performing an elementwise operation.
  *
@@ -102,6 +106,24 @@ public:
     }
     inline bool isOutputContiguous() const {
         return _output_contiguous;
+    }
+    inline bool canUseContiguousFastPath() const {
+        if (!_output_contiguous) {
+            return false;
+        }
+
+        const auto *input_contiguous = getInputContiguous();
+        const auto *output_shape = getOutputShape();
+        for (size_t i = 0; i < _input_size; ++i) {
+            if (!input_contiguous[i]
+                || !std::equal(output_shape, output_shape + _ndim, getInputShape(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+    inline bool canUseInlineMetaFastPath() const {
+        return _ndim <= INLINE_META_MAX_NDIM;
     }
     inline const size_t *getOutputShape() const {
         return reinterpret_cast<const size_t *>(_meta.data());

@@ -4,6 +4,7 @@
 #include "../../../tensor.h"
 #include "../cuda/embedding_kernel.cuh"
 #include "embedding_nvidia.cuh"
+#include <cstdint>
 #include <cuda_runtime.h>
 
 template <typename T, typename IndexType>
@@ -14,49 +15,40 @@ INFINIOP_CUDA_KERNEL embeddingKernel(
     size_t num_indices,
     size_t embedding_dim,
     size_t vocab_size) {
-    // Calculate global thread index
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t idx = blockIdx.x;
+    if (idx >= num_indices) {
+        return;
+    }
 
-    if (idx < num_indices) {
-        // Get the index value
-        IndexType index_val = __ldg(&indices[idx]);
+    __shared__ IndexType index_val;
+    if (threadIdx.x == 0) {
+        index_val = indices[idx];
+    }
+    __syncthreads();
 
-        // Bounds check - handle negative indices gracefully
-        if (index_val >= 0 && static_cast<size_t>(index_val) < vocab_size) {
-            // Copy embedding vector from weight to output
-            const T *src = weight + static_cast<size_t>(index_val) * embedding_dim;
-            T *dst = output + idx * embedding_dim;
+    if (index_val < 0 || static_cast<size_t>(index_val) >= vocab_size) {
+        return;
+    }
 
-            // Choose optimal copy strategy based on type and alignment
-            if constexpr (std::is_same_v<T, float>) {
-                // Check alignment for float4 (16 bytes)
-                bool aligned_16 = is_aligned(src, 16) && is_aligned(dst, 16);
-                if (aligned_16 && embedding_dim >= 4 && embedding_dim % 4 == 0) {
-                    copyVectorizedFloat4<IndexType>(dst, src, embedding_dim);
-                } else if (embedding_dim >= 2 && embedding_dim % 2 == 0) {
-                    // Try float2 if not aligned to 16 bytes
-                    copyVectorizedFloat2<IndexType>(dst, src, embedding_dim);
-                } else {
-                    copyScalar<T, IndexType>(dst, src, embedding_dim);
-                }
-            } else if constexpr (std::is_same_v<T, half>) {
-                // Use half2 for vectorized access
-                if (embedding_dim >= 2 && embedding_dim % 2 == 0) {
-                    copyVectorizedHalf2<IndexType>(dst, src, embedding_dim);
-                } else {
-                    copyScalar<T, IndexType>(dst, src, embedding_dim);
-                }
-            } else if constexpr (std::is_same_v<T, cuda_bfloat16>) {
-                // Use bfloat162 for vectorized access
-                if (embedding_dim >= 2 && embedding_dim % 2 == 0) {
-                    copyVectorizedBFloat162<IndexType>(dst, src, embedding_dim);
-                } else {
-                    copyScalar<T, IndexType>(dst, src, embedding_dim);
-                }
-            } else {
-                // Fallback to scalar copy with __ldg
-                copyScalar<T, IndexType>(dst, src, embedding_dim);
-            }
+    const T *src = weight + static_cast<size_t>(index_val) * embedding_dim;
+    T *dst = output + idx * embedding_dim;
+
+    constexpr size_t VECTOR_BYTES = sizeof(uint4);
+    constexpr size_t ELEMENTS_PER_VECTOR = VECTOR_BYTES / sizeof(T);
+    const bool vectorized = reinterpret_cast<uintptr_t>(src) % VECTOR_BYTES == 0
+                         && reinterpret_cast<uintptr_t>(dst) % VECTOR_BYTES == 0
+                         && embedding_dim % ELEMENTS_PER_VECTOR == 0;
+
+    if (vectorized) {
+        const auto *src_vec = reinterpret_cast<const uint4 *>(src);
+        auto *dst_vec = reinterpret_cast<uint4 *>(dst);
+        const size_t vector_count = embedding_dim / ELEMENTS_PER_VECTOR;
+        for (size_t i = threadIdx.x; i < vector_count; i += blockDim.x) {
+            dst_vec[i] = src_vec[i];
+        }
+    } else {
+        for (size_t i = threadIdx.x; i < embedding_dim; i += blockDim.x) {
+            dst[i] = src[i];
         }
     }
 }
@@ -135,17 +127,18 @@ infiniStatus_t Descriptor::calculate(
 
     auto cuda_stream = reinterpret_cast<cudaStream_t>(stream);
 
-    // Dynamic block size optimization based on embedding_dim
-    // Smaller embedding_dim benefits from larger block size (better occupancy)
-    // Larger embedding_dim benefits from smaller block size (more registers per thread)
-    size_t block_size = 256; // Default
+    // One block cooperatively copies one embedding row. The previous mapping used
+    // one thread per row and serialized large language-model embeddings.
+    size_t block_size = 256;
     if (_embedding_dim <= 64) {
-        block_size = 512; // Small embedding_dim: use larger block for better occupancy
-    } else if (_embedding_dim >= 1024) {
-        block_size = 128; // Large embedding_dim: use smaller block to reduce register pressure
+        block_size = 32;
+    } else if (_embedding_dim <= 256) {
+        block_size = 64;
+    } else if (_embedding_dim <= 1024) {
+        block_size = 128;
     }
 
-    size_t grid_size = (_num_indices + block_size - 1) / block_size;
+    size_t grid_size = _num_indices;
 
     // Launch kernel based on dtypes
     if (_input_dtype == INFINI_DTYPE_I32) {

@@ -1,13 +1,14 @@
 #pragma once
 
+#include "infinicore.hpp"
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-
-#include "infinicore.hpp"
 
 namespace py = pybind11;
 
 namespace infinicore::tensor {
+
+Tensor from_list_py(py::handle data, DataType dtype);
 
 inline void bind(py::module &m) {
     py::class_<Tensor>(m, "Tensor")
@@ -38,7 +39,20 @@ inline void bind(py::module &m) {
         .def("unsqueeze", [](const Tensor &tensor, std::size_t dim) { return tensor->unsqueeze(dim); })
         .def("squeeze", [](const Tensor &tensor, std::size_t dim) { return tensor->squeeze(dim); })
         .def("reset", static_cast<void (Tensor::*)() noexcept>(&Tensor::reset))
-        .def("use_count", &Tensor::use_count);
+        .def("use_count", &Tensor::use_count)
+        .def("__str__", [](const Tensor &tensor) {
+            std::ostringstream oss;
+            oss << tensor;
+            return oss.str();
+        })
+        .def("__repr__", [](const Tensor &tensor) {
+            std::ostringstream oss;
+            oss << tensor;
+            return oss.str();
+        })
+        .def("__bool__", [](const Tensor &tensor) {
+            return bool(tensor);
+        });
 
     using EmptyFuncType = Tensor (*)(const Shape &, const DataType &, const Device &, bool);
     using StridedEmptyFuncType = Tensor (*)(const Shape &, const Strides &, const DataType &, const Device &, bool);
@@ -79,6 +93,8 @@ inline void bind(py::module &m) {
             return Tensor{infinicore::Tensor::strided_from_blob(reinterpret_cast<void *>(raw_ptr), shape, strides, dtype, device)};
         },
         pybind11::arg("raw_ptr"), pybind11::arg("shape"), pybind11::arg("strides"), pybind11::arg("dtype"), pybind11::arg("device"));
+
+    m.def("from_list", &from_list_py, py::arg("data"), py::arg("dtype"));
 }
 
 } // namespace infinicore::tensor

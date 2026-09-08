@@ -146,6 +146,7 @@ python scripts/install.py [XMAKE_CONFIG_FLAGS]
      xmake f --nv-gpu=true --cuda=$CUDA_HOME -cv
 
      # QY
+     # 需要指定环境变量QY_ROOT来确认库所在位置，比如说export QY_ROOT=/usr/local/XX
      xmake f --qy-gpu=true --cuda=$CUDA_HOME -cv
 
      # 寒武纪
@@ -155,23 +156,165 @@ python scripts/install.py [XMAKE_CONFIG_FLAGS]
      xmake f --ascend-npu=true -cv
      ```
 
-##### 试验功能 -- 使用flash attention库中的算子
+##### 试验功能 -- 使用英伟达平台 flash attention 库中的算子
 
   ```shell
 
-  # 在third_party目录拉取cutlass和flash attn库的源码(不需要--recursive)
+  # 该功能依赖 flash-attention 和 cutlass，默认不随仓库递归拉取。
+  # 对应子模块固定为以下提交：
+      ## flash-attention commit: 10846960ca0793b993446f6dbaf696479c127a9d
+      ## cutlass commit: 087c84df83d254b5fb295a7a408f1a1d554085cf
 
-  # 设置cutlass路径的环境变量CUTLASS_ROOT(部分环境可选)
-      export CUTLASS_ROOT=<path-to>/InfiniCore/third_party/cutlass
+  # 若需启用英伟达平台 flash attention 能力，请手动初始化对应子模块：
+      git -c submodule.third_party/flash-attention.update=checkout \
+          -c submodule.third_party/cutlass.update=checkout \
+          submodule update --init third_party/flash-attention third_party/cutlass
+
+  # 上述命令只初始化这两个顶层子模块，并会切换到仓库记录的固定提交。
+
+  # 设置cutlass路径的环境变量CUTLASS_HOME(部分环境可选)
+      export CUTLASS_HOME=<path-to>/InfiniCore/third_party/cutlass
 
   # xmake配置环节额外打开 --aten 开关，并设置 --flash-attn 库位置，例(cuda路径部分环境可使用默认)：
-      xmake f --nv-gpu=y --ccl=y --cuda=$CUDA_HOME --aten=y --flash-attn=<path-to>/InfiniCore/third_party/flash-attention -cv
+      xmake f --nv-gpu=y --ccl=y --aten=y [--graph=y] [--cuda=$CUDA_HOME] --flash-attn=<path-to>/InfiniCore/third_party/flash-attention -cv
 
   # 设置额外的环境变量
       export CPLUS_INCLUDE_PATH=$CUDA_HOME/include:$CPLUS_INCLUDE_PATH
 
-  # flash attenion库会伴随infinicore_cpp_api一同编译安装
+  # flash attention库会伴随infinicore_cpp_api一同编译安装
 
+  ```
+
+##### 试验功能 -- 使用昇腾平台 Flash Attention 能力
+
+  ```shell
+  # 昇腾平台的 Flash Attention 能力依赖 ATen。
+  # 同时启用 InfiniCCL 通信库和 Graph 接口：
+  xmake f --ascend-npu=true --aten=y --flash-attn=y --ccl=y --graph=y -cv
+  ```
+
+##### 试验功能 -- 使用寒武纪平台预编译 Flash Attention 能力
+
+  ~~~shell
+  # 寒武纪直接链接当前 Python 环境中已安装的 flash_attn_2_bang 扩展。
+  # --flash-attn 指向包含 flash_attn_2_bang*.so 的 site-packages 目录。
+  python -c "import flash_attn_2_bang; print(flash_attn_2_bang.__file__)"
+
+  export FLASH_ATTN_2_BANG_SO=/torch/venv3/pytorch/lib/python3.10/site-packages/flash_attn_2_bang.cpython-310-x86_64-linux-gnu.so
+  # MLU590，默认值也可以省略
+  xmake f --cambricon-mlu=true --bang-mlu-arch=mtp_592 \
+    --ccl=true --aten=true \
+    --flash-attn=/torch/venv3/pytorch/lib/python3.10/site-packages -cv
+
+  # MLU580
+  xmake f --cambricon-mlu=true --bang-mlu-arch=mtp_613 \
+    --ccl=true --aten=true \
+    --flash-attn=/torch/venv3/pytorch_infer/lib/python3.12/site-packages -cv
+
+  xmake build && xmake install && xmake build _infinicore && xmake install _infinicore && pip install -e .
+
+  # 当前 PyTorch/torch_mlu 使用 C++ ABI 0；依赖 InfiniCore 的 C++ 扩展
+  # 也必须使用相同 ABI。以 InfiniLM 为例：
+  cd ../InfiniLM
+  xmake f --cxxflags=-D_GLIBCXX_USE_CXX11_ABI=0 -c
+  xmake -r _infinilm
+  xmake install _infinilm
+
+  # 当前寒武纪 wheel 不导出专用 KV-cache 符号。分页路径仅收集
+  # block table 中的有效 KV token，随后调用 wheel 的 mha_varlen_fwd。
+  # head dimension 超过 wheel 限制或 Q/K/V 末维不一致时使用 ATen SDPA。
+  ~~~
+
+
+##### 试验功能 -- 使用摩尔线程开源 mate 提供的 flash attention 能力
+  ```shell
+  #该功能依赖摩尔线程开源项目 mate（https://github.com/MooreThreads/mate） v0.1.3 版本，默认不随仓库递归拉取。
+  
+  #若需启用摩尔线程开源项目 mate 提供的 flash attention 能力，请手动初始化对应子模块：
+  git -c submodule.third_party/mate.update=checkout submodule update --init --recursive third_party/mate
+
+  #随后参考 mate v0.1.3 README 进行编译，之后在 xmake 配置环节额外打开 --aten 开关和 --flash-attn 使用 mate 提供的 flash attention 能力，可参考：
+  xmake f --moore-gpu=y --aten=y --flash-attn=y -cv
+  ```
+
+##### 试验功能 -- 使用天数智芯平台 Flash Attention 能力
+
+  ```shell
+  # 天数智芯的 MHA、MHA VarLen 和 MHA KVCache 实现依赖 ATen，
+  # 可通过以下任一种方式启用：
+
+  # 方式一：使用 vendor operators 提供的 Flash Attention 实现。
+  xmake f --iluvatar-gpu=true --cuda=$CUDA_HOME --aten=true \
+      --use-vendor-ops=true -cv
+
+  # 方式二：指定包含 _C.cpython-*.so 的 vllm_iluvatar 预编译扩展目录。
+  # eg. --flash-attn=/usr/local/lib/python3.12/site-packages/vllm_iluvatar
+  xmake f --iluvatar-gpu=true --cuda=$CUDA_HOME --aten=true \
+      --flash-attn=<path-to-fa2> \
+      -cv
+
+  # 两种方式都会自动启用天数智芯 Flash Attention 实现，无需手动定义编译宏。
+  # 如需指定架构，可追加例如：--iluvatar_arch=ivcore11。
+
+  # 按需编译并安装 C++/Python 封装：
+  xmake build _infinicore
+  xmake install _infinicore
+  pip install -e .
+  ```
+
+
+##### 试验功能 -- 使用海光 DCU 平台预编译 flash-attn 能力
+
+  ```shell
+  # 海光 DCU 不在 InfiniCore 内现场编译 flash-attn，而是链接 Python 环境中已经安装好的 flash-attn 运行库。
+  # 因此 --flash-attn 需要指向 flash-attn 的 Python 安装根目录，通常是当前 Python 的 site-packages/dist-packages 目录。
+  # 该目录下需要能找到以下两个文件：
+  #   1. flash_attn_2_cuda*.so
+  #   2. flash_attn/lib/libflash_attention.so
+  # 例如：
+  #   /usr/local/lib/python3.10/dist-packages/flash_attn_2_cuda.cpython-310-x86_64-linux-gnu.so
+  #   /usr/local/lib/python3.10/dist-packages/flash_attn/lib/libflash_attention.so
+
+  # 若 flash_attn_2_cuda*.so 不在 --flash-attn 指定目录下，可通过 FLASH_ATTN_2_CUDA_SO 显式指定。
+  export FLASH_ATTN_2_CUDA_SO=/usr/local/lib/python3.10/dist-packages/flash_attn_2_cuda.cpython-310-x86_64-linux-gnu.so
+
+  # xmake 配置环节需要同时打开海光 DCU、ATen 和 flash-attn：
+  xmake f --hygon-dcu=y --aten=y --flash-attn=/usr/local/lib/python3.10/dist-packages -cv
+
+  # 编译 Python/C++ 封装：
+  xmake build _infinicore
+  xmake install _infinicore
+  ```
+
+##### 试验功能 -- 使用阿里 PPU 平台预编译 flash-attn 能力
+
+  ```shell
+  # 阿里 PPU 直接链接当前 Python 环境中已安装的 flash_attn_2_cuda 扩展。
+  # --flash-attn 指向包含 flash_attn_2_cuda*.so 的 site-packages 目录。
+  python -c "import flash_attn_2_cuda; print(flash_attn_2_cuda.__file__)"
+
+  export FLASH_ATTN_2_CUDA_SO=/usr/local/lib/python3.12/site-packages/flash_attn_2_cuda.cpython-312-x86_64-linux-gnu.so
+  xmake f --ali-ppu=true --ccl=true --graph=true --aten=true \
+      --flash-attn=/usr/local/lib/python3.12/site-packages -cv
+
+  xmake build
+  xmake install
+  xmake build _infinicore
+  xmake install _infinicore
+  pip install -e .
+  ```
+
+##### 试验功能 -- 编译marlin相关算子
+
+  ```shell
+
+  # 需要从github上克隆tvm_ffi仓库，克隆命令参考
+  ## tvm-ffi commit: 35c99d0ac4cb784862115d0089f60c603acec8f9
+      git clone https://github.com/apache/tvm-ffi.git --recursive
+
+  # 设置TVM_ROOT
+      export TVM_ROOT=<path-to>/tvm-ffi #用来搜索tvm相关头文件
+  # 注意，编译gptq_marlin_gemm算子的时候除了指定TVM_ROOT以外，还需要指定cuda_arch
   ```
 
 2. 编译安装

@@ -3,6 +3,12 @@
 
 namespace infinicore::op {
 
+common::OpDispatcher<graph::graph_replay_schema> &
+mha_kvcache_graph_replay_dispatcher() {
+    static common::OpDispatcher<graph::graph_replay_schema> dispatcher;
+    return dispatcher;
+}
+
 INFINICORE_GRAPH_OP_DISPATCHERS_IMPL(MhaKVCache);
 
 MhaKVCache::MhaKVCache(Tensor out,
@@ -16,6 +22,8 @@ MhaKVCache::MhaKVCache(Tensor out,
     INFINICORE_ASSERT_TENSORS_SAME_DEVICE(out, q, k_cache, v_cache, seqlens_k, block_table);
     INFINICORE_GRAPH_OP_DISPATCH(out->device().getType(),
                                  out, q, k_cache, v_cache, seqlens_k, block_table, alibi_slopes, scale);
+    set_graph_replay_handler(
+        mha_kvcache_graph_replay_dispatcher().lookup(out->device().getType()));
 }
 
 void MhaKVCache::execute(Tensor out,

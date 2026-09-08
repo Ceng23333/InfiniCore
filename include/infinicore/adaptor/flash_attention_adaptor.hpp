@@ -5,14 +5,22 @@
 // NVIDIA flash-attn-nvidia.so uses namespace flash. The pip/MetaX flash_attn_2_cuda extension
 // exports the same entry points at global scope (no namespace), matching FLASH_NAMESPACE builds
 // where the namespace is empty.
-#if !defined(ENABLE_METAX_API)
+//
+// Ascend (aclnn C API path) does NOT use the flash:: namespace at all — the aclnn kernels are
+// called directly from the dedicated *._ascend.cc implementation files, so this header is only
+// included by the NVIDIA/MetaX/QY code paths.  We still guard the namespace below so that
+// existing code compiles unchanged when ENABLE_ASCEND_FLASH_ATTN is defined.
+#if !defined(ENABLE_METAX_API) && !defined(ENABLE_ASCEND_FLASH_ATTN)
 namespace flash {
 #endif
 std::vector<at::Tensor>
-mha_fwd(at::Tensor &q,                            // batch_size x seqlen_q x num_heads x round_multiple(head_size, 8)
-        const at::Tensor &k,                      // batch_size x seqlen_k x num_heads_k x round_multiple(head_size, 8)
-        const at::Tensor &v,                      // batch_size x seqlen_k x num_heads_k x round_multiple(head_size, 8)
-        std::optional<at::Tensor> &out_,          // batch_size x seqlen_q x num_heads x round_multiple(head_size, 8)
+mha_fwd(at::Tensor &q,                   // batch_size x seqlen_q x num_heads x round_multiple(head_size, 8)
+        const at::Tensor &k,             // batch_size x seqlen_k x num_heads_k x round_multiple(head_size, 8)
+        const at::Tensor &v,             // batch_size x seqlen_k x num_heads_k x round_multiple(head_size, 8)
+        std::optional<at::Tensor> &out_, // batch_size x seqlen_q x num_heads x round_multiple(head_size, 8)
+#if defined(ENABLE_METAX_API)
+        std::optional<at::Tensor> &softmax_lse_, // MetaX flash-attn dense fwd ABI includes an optional preallocated LSE tensor
+#endif
         std::optional<at::Tensor> &alibi_slopes_, // num_heads or batch_size x num_heads
         const float p_dropout,
         const float softmax_scale,
@@ -21,7 +29,16 @@ mha_fwd(at::Tensor &q,                            // batch_size x seqlen_q x num
         int window_size_right,
         const float softcap,
         const bool return_softmax,
-        std::optional<at::Generator> gen_);
+        std::optional<at::Generator> gen_
+#if defined(ENABLE_METAX_API) && defined(INFINICORE_HPCC_VERSION_MAJOR) && (INFINICORE_HPCC_VERSION_MAJOR >= 3)
+        // MetaX/Mars `flash_attn_2_cuda` (e.g. 2.6.x+mars) appends this argument vs upstream Dao-AILab flash-attn.
+        ,
+        std::optional<at::Tensor> &flash_attn_mars_ext_
+        // MACA 3.8 / vllm-metax flash_attn_2_cuda adds an extra trailing bool.
+        ,
+        bool flash_attn_mars_ext_flag_ = false
+#endif
+);
 
 std::vector<at::Tensor>
 mha_varlen_fwd(at::Tensor &q,                               // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
@@ -49,8 +66,11 @@ mha_varlen_fwd(at::Tensor &q,                               // total_q x num_hea
                // MetaX/Mars `flash_attn_2_cuda` (e.g. 2.6.x+mars) appends this argument vs upstream Dao-AILab flash-attn.
                ,
                std::optional<at::Tensor> &flash_attn_mars_ext_
+               // MACA 3.8 / vllm-metax flash_attn_2_cuda adds an extra trailing bool.
+               ,
+               bool flash_attn_mars_ext_flag_ = false
 #endif
-    );
+);
 
 std::vector<at::Tensor>
 mha_bwd(const at::Tensor &dout,                   // batch_size x seqlen_q x num_heads, x multiple_of(head_size_og, 8)
@@ -125,9 +145,9 @@ mha_fwd_kvcache(at::Tensor &q,                                     // batch_size
                 ,
                 std::optional<at::Tensor> &flash_attn_mars_ext_
 #endif
-    );
+);
 
-#if !defined(ENABLE_METAX_API)
+#if !defined(ENABLE_METAX_API) && !defined(ENABLE_ASCEND_FLASH_ATTN)
 } // namespace flash
 #endif
 #endif // ENABLE_FLASH_ATTN

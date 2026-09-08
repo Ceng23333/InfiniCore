@@ -2,27 +2,17 @@
 
 #include "../../utils.hpp"
 
-#include <stdexcept>
-
 namespace infinicore::op {
 
-common::OpDispatcher<HardTanh::schema> &HardTanh::dispatcher() {
-    static common::OpDispatcher<HardTanh::schema> dispatcher_;
-    return dispatcher_;
+INFINICORE_GRAPH_OP_DISPATCHERS_IMPL(HardTanh);
+
+HardTanh::HardTanh(Tensor output, Tensor input, float min_val, float max_val) {
+    INFINICORE_ASSERT_TENSORS_SAME_DEVICE(output, input);
+    INFINICORE_GRAPH_OP_DISPATCH(output->device().getType(), output, input, min_val, max_val);
 }
 
 void HardTanh::execute(Tensor output, Tensor input, float min_val, float max_val) {
-    INFINICORE_ASSERT_TENSORS_SAME_DEVICE(output, input);
-    infinicore::context::setDevice(output->device());
-
-    auto device_type = output->device().getType();
-    auto func = dispatcher().lookup(device_type);
-    if (func == nullptr) {
-        throw std::runtime_error(
-            "No HardTanh implementation found for device type: " + std::to_string(static_cast<int>(device_type)));
-    }
-
-    func(output, input, min_val, max_val);
+    INFINICORE_GRAPH_OP_RECORD_OR_RUN(HardTanh, output, input, min_val, max_val);
 }
 
 Tensor hardtanh(Tensor input, float min_val, float max_val) {

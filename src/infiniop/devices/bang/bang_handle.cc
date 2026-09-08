@@ -35,22 +35,33 @@ int Handle::Internal::getClusterCount() const { return _cluster_count; }
 
 cnnlDataType_t getCnnlDtype(infiniDtype_t dt) {
     switch (dt) {
+    case INFINI_DTYPE_BYTE:
+    case INFINI_DTYPE_U8:
+        return CNNL_DTYPE_UINT8;
+    case INFINI_DTYPE_BOOL:
+        return CNNL_DTYPE_BOOL;
+    case INFINI_DTYPE_I8:
+        return CNNL_DTYPE_INT8;
+    case INFINI_DTYPE_I16:
+        return CNNL_DTYPE_INT16;
+    case INFINI_DTYPE_I32:
+        return CNNL_DTYPE_INT32;
+    case INFINI_DTYPE_I64:
+        return CNNL_DTYPE_INT64;
+    case INFINI_DTYPE_U16:
+        return CNNL_DTYPE_UINT16;
+    case INFINI_DTYPE_U32:
+        return CNNL_DTYPE_UINT32;
+    case INFINI_DTYPE_U64:
+        return CNNL_DTYPE_UINT64;
+    case INFINI_DTYPE_F16:
+        return CNNL_DTYPE_HALF;
     case INFINI_DTYPE_F32:
         return CNNL_DTYPE_FLOAT;
     case INFINI_DTYPE_F64:
         return CNNL_DTYPE_DOUBLE;
-    case INFINI_DTYPE_F16:
-        return CNNL_DTYPE_HALF;
-    case INFINI_DTYPE_I8:
-        return CNNL_DTYPE_INT8;
-    case INFINI_DTYPE_I32:
-        return CNNL_DTYPE_INT32;
-    case INFINI_DTYPE_U8:
-        return CNNL_DTYPE_UINT8;
     case INFINI_DTYPE_BF16:
         return CNNL_DTYPE_BFLOAT16;
-    case INFINI_DTYPE_I64:
-        return CNNL_DTYPE_INT64;
     default:
         return CNNL_DTYPE_INVALID;
     }

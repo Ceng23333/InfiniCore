@@ -1,63 +1,50 @@
-#include "../../utils.hpp"
-#include "infinicore/common/hash.hpp"
-#include "infinicore/ops/common/cache.hpp"
 #include "infinicore/ops/hardtanh.hpp"
-#include <infiniop.h>
+
+#include "../infiniop_impl.hpp"
 
 namespace infinicore::op::hardtanh_impl::infiniop {
 
-thread_local common::OpCache<size_t, infiniopHardTanhDescriptor_t> caches(
-    100,
-    [](infiniopHardTanhDescriptor_t &desc) {
-        if (desc != nullptr) {
-            INFINICORE_CHECK_ERROR(infiniopDestroyHardTanhDescriptor(desc));
-            desc = nullptr;
-        }
-    });
+INFINIOP_CACHABLE_DESCRIPTOR(Descriptor, HardTanh, 100);
 
-void calculate(Tensor output, Tensor input, float min_val, float max_val) {
+struct PlannedMeta {
+    std::shared_ptr<Descriptor> descriptor;
+    graph::GraphTensor workspace, output, input;
+};
+
+void *plan(Tensor output, Tensor input, float min_val, float max_val) {
     size_t seed = hash_combine(output, input, min_val, max_val);
 
-    auto device = context::getDevice();
-    auto &cache = caches.getCache(device);
+    INFINIOP_CACHABLE_DESCRIPTOR_GET_OR_CREATE(
+        Descriptor, descriptor, HardTanh,
+        seed,
+        output->desc(), input->desc(), min_val, max_val);
 
-    auto desc_opt = cache.get(seed);
-    infiniopHardTanhDescriptor_t desc = nullptr;
+    INFINIOP_WORKSPACE_TENSOR(workspace, HardTanh, descriptor);
 
-    if (!desc_opt) {
-        INFINICORE_CHECK_ERROR(infiniopCreateHardTanhDescriptor(
-            context::getInfiniopHandle(device),
-            &desc,
-            output->desc(),
-            input->desc(),
-            min_val,
-            max_val));
-        cache.put(seed, desc);
-    } else {
-        desc = *desc_opt;
-    }
+    return new PlannedMeta{
+        descriptor,
+        graph::GraphTensor(workspace),
+        graph::GraphTensor(output),
+        graph::GraphTensor(input)};
+}
 
-    size_t workspace_size = 0;
-    INFINICORE_CHECK_ERROR(infiniopGetHardTanhWorkspaceSize(desc, &workspace_size));
-    std::shared_ptr<Memory> workspace;
-    void *workspace_ptr = nullptr;
-    if (workspace_size != 0) {
-        workspace = context::allocateMemory(workspace_size);
-        workspace_ptr = workspace->data();
-    }
+void run(void *planned_meta) {
+    auto planned = reinterpret_cast<PlannedMeta *>(planned_meta);
 
     INFINICORE_CHECK_ERROR(infiniopHardTanh(
-        desc,
-        workspace_ptr,
-        workspace_size,
-        output->data(),
-        input->data(),
+        planned->descriptor->desc,
+        planned->workspace->data(),
+        planned->workspace->numel(),
+        planned->output->data(),
+        planned->input->data(),
         context::getStream()));
 }
 
-static bool registered = []() {
-    HardTanh::dispatcher().registerAll(&calculate, false);
-    return true;
-}();
+void cleanup(void **planned_meta_ptr) {
+    delete *reinterpret_cast<PlannedMeta **>(planned_meta_ptr);
+    *planned_meta_ptr = nullptr;
+}
+
+INFINICORE_GRAPH_OP_REGISTER_ALLDEVICE(HardTanh, &plan, &run, &cleanup);
 
 } // namespace infinicore::op::hardtanh_impl::infiniop

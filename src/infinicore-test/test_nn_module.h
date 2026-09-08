@@ -27,20 +27,21 @@ public:
     INFINICORE_NN_PARAMETER(bias);
 
     MockLinearModule(int input_size, int output_size, const infinicore::Device &device,
-                     Size tp_dim = 0, Size tp_rank = 0, Size tp_size = 1)
+                     Size tp_dim = 0, Size tp_rank = 0, Size tp_size = 1,
+                     const infinicore::DataType &dtype = infinicore::DataType::F32)
         : input_size_(input_size), output_size_(output_size), device_(device),
           tp_dim_(tp_dim), tp_rank_(tp_rank), tp_size_(tp_size) {
         // Initialize parameters using macros
         INFINICORE_NN_PARAMETER_INIT(weight,
                                      ({static_cast<size_t>(output_size), static_cast<size_t>(input_size)},
-                                      infinicore::DataType::F32,
+                                      dtype,
                                       device,
                                       tp_dim_,
                                       tp_rank_,
                                       tp_size_));
         INFINICORE_NN_PARAMETER_INIT(bias,
                                      ({static_cast<size_t>(output_size)},
-                                      infinicore::DataType::F32,
+                                      dtype,
                                       device,
                                       0,
                                       tp_dim == 0 ? tp_rank_ : 0,
@@ -90,16 +91,13 @@ public:
 private:
     TestResult testBasicModuleCreation();      // Merged: creation, parameters, state_dict, load_state_dict
     TestResult testTensorParallelParameters(); // Module with tensor parallel parameters
-    TestResult testParalleLinear();            // Module with ColumnParallelLinear, RowParallelLinear
     TestResult testLoadStateDict();            // Advanced: hierarchical modules
     TestResult testModuleHierarchy();          // Demonstrates proper hierarchical construction pattern
     TestResult testParameterLoading();         // Test blob parameter loading
-    TestResult testModuleLinear();             // Comprehensive Linear module test
     TestResult testModuleEmbedding();          // Embedding module test
     TestResult testModuleRMSNorm();            // RMSNorm module test
     TestResult testModuleRoPE();               // RoPE module test
     TestResult testDtypeAssertion();           // Test dtype assertions when loading parameters
-    TestResult testTinyLlamaConstruction();    // Comprehensive: construction + weight loading + validation
 };
 
 } // namespace infinicore::test

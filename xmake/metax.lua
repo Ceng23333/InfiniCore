@@ -59,6 +59,16 @@ target("infinicore_cpp_api")
 target_end()
 
 add_includedirs(MACA_ROOT .. "/include")
+-- MACA 3.8 / ATen cu-bridge needs mcr + cu-bridge headers
+add_includedirs(MACA_ROOT .. "/include/mcr")
+add_includedirs(MACA_ROOT .. "/include/common")
+add_includedirs(MACA_ROOT .. "/include/mcsparse")
+add_includedirs(MACA_ROOT .. "/include/mcblas")
+add_includedirs(MACA_ROOT .. "/include/mcdnn")
+add_includedirs(MACA_ROOT .. "/include/mcfft")
+add_includedirs(MACA_ROOT .. "/include/mcrand")
+add_includedirs(MACA_ROOT .. "/include/mcsolver")
+add_includedirs(MACA_ROOT .. "/tools/cu-bridge/include")
 add_linkdirs(MACA_ROOT .. "/lib")
 if has_config("use-mc") then
     add_links("mcdnn", "mcblas", "mcruntime")

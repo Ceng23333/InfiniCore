@@ -6,6 +6,11 @@
 
 using namespace device::bang::kernel;
 
+template <size_t N>
+struct ElementwiseInputPointers {
+    const void *values[N];
+};
+
 /**
  * @brief Core elementwise operation implementation for BANG device.
  *
@@ -98,7 +103,11 @@ __mlu_device__ void launchOp(
         // 2. Execute operation
         Tdata *output_buffer = aligned_buf + N * max_batch;
         Op op;
-        op(output_buffer, input_buffers[0], input_buffers[1], curr_batch, args...);
+        if constexpr (N == 1) {
+            op(output_buffer, input_buffers[0], input_buffers[0], curr_batch, args...);
+        } else {
+            op(output_buffer, input_buffers[0], input_buffers[1], curr_batch, args...);
+        }
         __sync_compute();
 
         // 3. Write back results
@@ -162,13 +171,13 @@ __mlu_global__ void elementwiseKernel(
     const ptrdiff_t *output_strides,
     const ptrdiff_t *input_strides,
     Tdata *output,
-    const void *const *inputs,
+    ElementwiseInputPointers<N> inputs,
     Args... args) {
 
     // Cast input pointers to the correct type
     Tdata *typed_inputs[N];
     for (size_t i = 0; i < N; ++i) {
-        typed_inputs[i] = reinterpret_cast<Tdata *>(const_cast<void *>(inputs[i]));
+        typed_inputs[i] = reinterpret_cast<Tdata *>(const_cast<void *>(inputs.values[i]));
     }
 
     // Calculate workload per task
@@ -254,13 +263,18 @@ void launchElementwiseKernelWrapper(
         func_type = cnrtFuncTypeUnion1;
     }
 
+    ElementwiseInputPointers<N> kernel_inputs{};
+    for (size_t i = 0; i < N; ++i) {
+        kernel_inputs.values[i] = inputs[i];
+    }
+
     // Launch the kernel with optimal configuration
     elementwiseKernel<N, Op, Tdata><<<dim, func_type, queue>>>(
         output_size, ndim, output_contiguous,
         input_contiguous, input_broadcasted,
         output_shape, input_shapes,
         output_strides, input_strides,
-        output, inputs, args...);
+        output, kernel_inputs, args...);
 }
 
 /**

@@ -66,7 +66,7 @@ target_end()
 
 target("infinicore-test")
     set_kind("binary")
-    add_deps("infiniop", "infinirt", "infiniccl")
+    add_deps("infinicore_cpp_api")
     set_default(false)
 
     set_languages("cxx17")
@@ -77,8 +77,9 @@ target("infinicore-test")
     add_linkdirs(INFINI_ROOT.."/lib")
     add_links("infiniop", "infinirt", "infiniccl")
 
-    -- Add spdlog support
+    -- Add spdlog / nlohmann support
     add_includedirs("third_party/spdlog/include")
+    add_includedirs("third_party/nlohmann_json/single_include")
     add_defines("SPDLOG_ACTIVE_LEVEL=0")  -- Enable all log levels
 
     add_files(os.projectdir().."/src/infinicore/*.cc")
@@ -87,6 +88,9 @@ target("infinicore-test")
     add_files(os.projectdir().."/src/infinicore/tensor/*.cc")
     add_files(os.projectdir().."/src/infinicore/ops/*/*.cc")
     add_files(os.projectdir().."/src/infinicore/nn/*.cc")
+    if has_config("mutual-awareness") then
+        add_files(os.projectdir().."/src/infinicore/analyzer/*.cc")
+    end
 
     add_files(os.projectdir().."/src/infinicore-test/**.cc")
     set_installdir(INFINI_ROOT)

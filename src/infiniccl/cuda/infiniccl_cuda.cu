@@ -1,5 +1,6 @@
 #include "infiniccl_cuda.h"
 
+#include <cstring>
 #include <cuda_runtime.h>
 #include <iostream>
 #include <nccl.h>
@@ -18,6 +19,14 @@ inline cudaStream_t getCudaStream(infinirtStream_t stream) {
 
 inline ncclDataType_t getNcclDtype(infiniDtype_t datatype) {
     switch (datatype) {
+    case INFINI_DTYPE_I32:
+        return ncclInt32;
+    case INFINI_DTYPE_I64:
+        return ncclInt64;
+    case INFINI_DTYPE_U32:
+        return ncclUint32;
+    case INFINI_DTYPE_U64:
+        return ncclUint64;
     case INFINI_DTYPE_F32:
         return ncclFloat;
     case INFINI_DTYPE_F16:
@@ -54,6 +63,13 @@ inline ncclComm_t getNcclComm(infinicclComm_t comm) {
 
 namespace infiniccl::cuda {
 
+infiniStatus_t getCommName(
+    infinicclComm_t comm,
+    char *comm_name,
+    size_t comm_name_size) {
+    return getCommNameFromHandle(comm, comm_name, comm_name_size);
+}
+
 infiniStatus_t commInitAll(
     infinicclComm_t *comms,
     int ndevice,
@@ -63,15 +79,58 @@ infiniStatus_t commInitAll(
     CHECK_NCCL(ncclCommInitAll(nccl_comms.data(), ndevice, (int const *)device_ids));
 
     for (int i = 0; i < ndevice; i++) {
-        comms[i] = new InfinicclComm{INFINI_DEVICE_NVIDIA, device_ids[i], (void *)(nccl_comms[i])};
+        comms[i] = new InfinicclComm{INFINI_DEVICE_NVIDIA, device_ids[i], (void *)(nccl_comms[i]), i, ndevice};
     }
 
+    return INFINI_STATUS_SUCCESS;
+}
+
+infiniStatus_t getUniqueId(infinicclUniqueId_t *unique_id) {
+    if (unique_id == nullptr) {
+        return INFINI_STATUS_NULL_POINTER;
+    }
+
+    CHECK_NCCL(ncclGetUniqueId(reinterpret_cast<ncclUniqueId *>(unique_id)));
+    return INFINI_STATUS_SUCCESS;
+}
+
+infiniStatus_t commInitRank(
+    infinicclComm_t *comm,
+    int nranks,
+    infinicclUniqueId_t comm_id,
+    int rank) {
+    if (comm == nullptr) {
+        return INFINI_STATUS_NULL_POINTER;
+    }
+    if (nranks <= 0 || rank < 0 || rank >= nranks) {
+        return INFINI_STATUS_BAD_PARAM;
+    }
+
+    infiniDevice_t device_type;
+    int device_id;
+    CHECK_STATUS(infinirtGetDevice(&device_type, &device_id));
+
+    ncclUniqueId nccl_id;
+    std::memcpy(&nccl_id, &comm_id, sizeof(nccl_id));
+    ncclComm_t nccl_comm;
+    CHECK_NCCL(ncclCommInitRank(&nccl_comm, nranks, nccl_id, rank));
+    *comm = new InfinicclComm{device_type, device_id, (void *)nccl_comm, rank, nranks};
     return INFINI_STATUS_SUCCESS;
 }
 
 infiniStatus_t commDestroy(infinicclComm_t comm) {
     CHECK_NCCL(ncclCommDestroy(getNcclComm(comm)));
     delete comm;
+    return INFINI_STATUS_SUCCESS;
+}
+
+infiniStatus_t groupStart(infinicclComm_t) {
+    CHECK_NCCL(ncclGroupStart());
+    return INFINI_STATUS_SUCCESS;
+}
+
+infiniStatus_t groupEnd(infinicclComm_t) {
+    CHECK_NCCL(ncclGroupEnd());
     return INFINI_STATUS_SUCCESS;
 }
 
@@ -84,10 +143,190 @@ infiniStatus_t allReduce(
     infinicclComm_t comm,
     infinirtStream_t stream) {
 
-    CHECK_DTYPE(datatype, INFINI_DTYPE_F32, INFINI_DTYPE_F16, INFINI_DTYPE_BF16);
+    CHECK_DTYPE(datatype, INFINI_DTYPE_F32, INFINI_DTYPE_F16,
+                INFINI_DTYPE_BF16, INFINI_DTYPE_I32, INFINI_DTYPE_I64,
+                INFINI_DTYPE_U32, INFINI_DTYPE_U64);
 
     CHECK_NCCL(ncclAllReduce(sendbuf, recvbuf, count, getNcclDtype(datatype),
                              getNcclRedOp(op), getNcclComm(comm), getCudaStream(stream)));
+
+    return INFINI_STATUS_SUCCESS;
+}
+
+infiniStatus_t broadcast(
+    const void *sendbuf,
+    void *recvbuf,
+    size_t count,
+    infiniDtype_t datatype,
+    int root,
+    infinicclComm_t comm,
+    infinirtStream_t stream) {
+
+    if (sendbuf == nullptr || recvbuf == nullptr || comm == nullptr) {
+        return INFINI_STATUS_NULL_POINTER;
+    }
+    if (root < 0 || root >= comm->world_size || count == 0) {
+        return INFINI_STATUS_BAD_PARAM;
+    }
+    CHECK_DTYPE(datatype, INFINI_DTYPE_F32, INFINI_DTYPE_F16, INFINI_DTYPE_BF16,
+                INFINI_DTYPE_I32, INFINI_DTYPE_I64, INFINI_DTYPE_U32, INFINI_DTYPE_U64);
+
+    CHECK_NCCL(ncclBroadcast(sendbuf, recvbuf, count, getNcclDtype(datatype), root,
+                             getNcclComm(comm), getCudaStream(stream)));
+
+    return INFINI_STATUS_SUCCESS;
+}
+
+infiniStatus_t send(
+    const void *sendbuf,
+    size_t count,
+    infiniDtype_t datatype,
+    int peer,
+    infinicclComm_t comm,
+    infinirtStream_t stream) {
+
+    if (sendbuf == nullptr || comm == nullptr) {
+        return INFINI_STATUS_NULL_POINTER;
+    }
+    if (peer < 0 || peer >= comm->world_size || count == 0) {
+        return INFINI_STATUS_BAD_PARAM;
+    }
+    CHECK_DTYPE(datatype, INFINI_DTYPE_F32, INFINI_DTYPE_F16, INFINI_DTYPE_BF16,
+                INFINI_DTYPE_I32, INFINI_DTYPE_I64, INFINI_DTYPE_U32, INFINI_DTYPE_U64);
+
+    CHECK_NCCL(ncclSend(sendbuf, count, getNcclDtype(datatype), peer,
+                        getNcclComm(comm), getCudaStream(stream)));
+
+    return INFINI_STATUS_SUCCESS;
+}
+
+infiniStatus_t recv(
+    void *recvbuf,
+    size_t count,
+    infiniDtype_t datatype,
+    int peer,
+    infinicclComm_t comm,
+    infinirtStream_t stream) {
+
+    if (recvbuf == nullptr || comm == nullptr) {
+        return INFINI_STATUS_NULL_POINTER;
+    }
+    if (peer < 0 || peer >= comm->world_size || count == 0) {
+        return INFINI_STATUS_BAD_PARAM;
+    }
+    CHECK_DTYPE(datatype, INFINI_DTYPE_F32, INFINI_DTYPE_F16, INFINI_DTYPE_BF16,
+                INFINI_DTYPE_I32, INFINI_DTYPE_I64, INFINI_DTYPE_U32, INFINI_DTYPE_U64);
+
+    CHECK_NCCL(ncclRecv(recvbuf, count, getNcclDtype(datatype), peer,
+                        getNcclComm(comm), getCudaStream(stream)));
+
+    return INFINI_STATUS_SUCCESS;
+}
+
+infiniStatus_t allGather(
+    void *sendbuf,
+    void *recvbuf,
+    size_t send_count,
+    infiniDtype_t datatype,
+    infinicclComm_t comm,
+    infinirtStream_t stream) {
+
+    CHECK_DTYPE(datatype, INFINI_DTYPE_F32, INFINI_DTYPE_F16, INFINI_DTYPE_BF16,
+                INFINI_DTYPE_I32, INFINI_DTYPE_I64, INFINI_DTYPE_U32, INFINI_DTYPE_U64);
+
+    CHECK_NCCL(ncclAllGather(sendbuf, recvbuf, send_count, getNcclDtype(datatype),
+                             getNcclComm(comm), getCudaStream(stream)));
+
+    return INFINI_STATUS_SUCCESS;
+}
+
+infiniStatus_t allGatherV(
+    void *sendbuf,
+    void *recvbuf,
+    const size_t *recv_counts,
+    int nranks,
+    infiniDtype_t datatype,
+    infinicclComm_t comm,
+    infinirtStream_t stream) {
+
+    CHECK_DTYPE(datatype, INFINI_DTYPE_F32, INFINI_DTYPE_F16, INFINI_DTYPE_BF16,
+                INFINI_DTYPE_I32, INFINI_DTYPE_I64, INFINI_DTYPE_U32, INFINI_DTYPE_U64);
+    CHECK_OR_DO(nranks == comm->world_size, return INFINI_STATUS_BAD_PARAM);
+
+    auto cuda_stream = getCudaStream(stream);
+    ncclComm_t nccl_comm = getNcclComm(comm);
+    ncclDataType_t nccl_dtype = getNcclDtype(datatype);
+    size_t offset = 0;
+
+    CHECK_NCCL(ncclGroupStart());
+    for (int root = 0; root < nranks; ++root) {
+        CHECK_NCCL(ncclBroadcast(
+            sendbuf,
+            static_cast<char *>(recvbuf) + offset,
+            recv_counts[root],
+            nccl_dtype,
+            root,
+            nccl_comm,
+            cuda_stream));
+        offset += recv_counts[root] * infiniSizeOf(datatype);
+    }
+    CHECK_NCCL(ncclGroupEnd());
+
+    return INFINI_STATUS_SUCCESS;
+}
+
+infiniStatus_t reduceScatter(
+    void *sendbuf,
+    void *recvbuf,
+    size_t recv_count,
+    infiniDtype_t datatype,
+    infinicclReduceOp_t op,
+    infinicclComm_t comm,
+    infinirtStream_t stream) {
+
+    CHECK_DTYPE(datatype, INFINI_DTYPE_F32, INFINI_DTYPE_F16, INFINI_DTYPE_BF16,
+                INFINI_DTYPE_I32, INFINI_DTYPE_I64, INFINI_DTYPE_U32, INFINI_DTYPE_U64);
+
+    CHECK_NCCL(ncclReduceScatter(sendbuf, recvbuf, recv_count, getNcclDtype(datatype),
+                                 getNcclRedOp(op), getNcclComm(comm), getCudaStream(stream)));
+
+    return INFINI_STATUS_SUCCESS;
+}
+
+infiniStatus_t reduceScatterV(
+    void *sendbuf,
+    void *recvbuf,
+    const size_t *send_counts,
+    int nranks,
+    infiniDtype_t datatype,
+    infinicclReduceOp_t op,
+    infinicclComm_t comm,
+    infinirtStream_t stream) {
+
+    CHECK_DTYPE(datatype, INFINI_DTYPE_F32, INFINI_DTYPE_F16, INFINI_DTYPE_BF16,
+                INFINI_DTYPE_I32, INFINI_DTYPE_I64, INFINI_DTYPE_U32, INFINI_DTYPE_U64);
+    CHECK_OR_DO(nranks == comm->world_size, return INFINI_STATUS_BAD_PARAM);
+
+    auto cuda_stream = getCudaStream(stream);
+    ncclComm_t nccl_comm = getNcclComm(comm);
+    ncclDataType_t nccl_dtype = getNcclDtype(datatype);
+    ncclRedOp_t nccl_op = getNcclRedOp(op);
+    size_t offset = 0;
+
+    CHECK_NCCL(ncclGroupStart());
+    for (int root = 0; root < nranks; ++root) {
+        CHECK_NCCL(ncclReduce(
+            static_cast<char *>(sendbuf) + offset,
+            recvbuf,
+            send_counts[root],
+            nccl_dtype,
+            nccl_op,
+            root,
+            nccl_comm,
+            cuda_stream));
+        offset += send_counts[root] * infiniSizeOf(datatype);
+    }
+    CHECK_NCCL(ncclGroupEnd());
 
     return INFINI_STATUS_SUCCESS;
 }

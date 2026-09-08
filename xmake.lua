@@ -6,15 +6,38 @@ add_requires("pybind11")
 local GREEN = '\27[0;32m'
 local YELLOW = '\27[1;33m'
 local NC = '\27[0m'  -- No Color
+local PYTHON = os.getenv("PYTHON")
+
+if not PYTHON or PYTHON == "" then
+    PYTHON = is_host("windows") and "python" or "python3"
+end
 
 set_encodings("utf-8")
 
 add_includedirs("include")
 add_includedirs("third_party/spdlog/include")
-add_includedirs("third_party/nlohmann_json/single_include/")
+add_includedirs("third_party/nlohmann_json/single_include")
 
 if is_mode("debug") then
     add_defines("DEBUG_MODE")
+end
+
+-- ATen
+option("aten")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Whether to link ATen and Torch libraries")
+option_end()
+
+-- Optional operator implementations backed by platform vendor libraries.
+option("use-vendor-ops")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Enable platform-specific InfiniCore vendor operator implementations")
+option_end()
+
+if has_config("use-vendor-ops") then
+    add_defines("ENABLE_VENDOR_OPS")
 end
 
 if is_plat("windows") then
@@ -67,16 +90,6 @@ if has_config("cudnn") then
     add_defines("ENABLE_CUDNN_API")
 end
 
-option("cutlass")
-    set_default(false)
-    set_showmenu(true)
-    set_description("Whether to compile cutlass for Nvidia GPU")
-option_end()
-
-if has_config("cutlass") then 
-    add_defines("ENABLE_CUTLASS_API")
-end
-
 option("cuda_arch")
     set_showmenu(true)
     set_description("Set CUDA GPU architecture (e.g. sm_90)")
@@ -89,6 +102,14 @@ option("cambricon-mlu")
     set_default(false)
     set_showmenu(true)
     set_description("Whether to compile implementations for Cambricon MLU")
+option_end()
+
+option("bang-mlu-arch")
+    set_default("mtp_592")
+    set_showmenu(true)
+    set_description("Set Cambricon BANG MLU architecture")
+    set_values("mtp_592", "mtp_613")
+    set_category("option")
 option_end()
 
 if has_config("cambricon-mlu") then
@@ -115,11 +136,11 @@ option("iluvatar-gpu")
     set_description("Whether to compile implementations for Iluvatar GPU")
 option_end()
 
-option("iluvatar_arch")
+option("iluvatar-arch")
     set_default("ivcore20")
     set_showmenu(true)
     set_description("Set Iluvatar GPU architecture (e.g. ivcore20)")
-    set_values("ivcore20")
+    set_values("ivcore11", "ivcore20")
     set_category("option")
 option_end()
 
@@ -171,6 +192,9 @@ if has_config("metax-gpu") then
         add_defines("ENABLE_METAX_MC_API")
         -- MACA torch build expects USE_MACA for ATen headers (e.g. C10_WARP_SIZE).
         add_defines("USE_MACA")
+        -- MetaX flash_attn_2_cuda (MACA 3.x) appends flash_attn_mars_ext_; keep this
+        -- as a global define so cache/reconfigure cannot drop the ABI flag.
+        add_defines("INFINICORE_HPCC_VERSION_MAJOR=3")
     else
         -- HPCC torch build expects this for ATen headers on hpcc.
         add_defines("USE_HPCC")
@@ -203,6 +227,13 @@ option("hygon-dcu")
     set_description("Whether to compile implementations for Hygon DCU")
 option_end()
 
+option("hygon-arch")
+    -- gfx906, gfx936
+    set_default(nil)
+    set_showmenu(true)
+    set_description("Set Hygon DCU architecture, e.g. gfx936. If unset, defaults to gfx936 for BW1000 DCU.")
+option_end()
+
 if has_config("hygon-dcu") then
     add_defines("ENABLE_HYGON_API")
     includes("xmake/hygon.lua")
@@ -231,13 +262,6 @@ if has_config("ninetoothed") then
     add_defines("ENABLE_NINETOOTHED")
 end
 
--- ATen
-option("aten")
-    set_default(false)
-    set_showmenu(true)
-    set_description("Wether to link aten and torch libraries")
-option_end()
-
 -- Flash-Attn
 option("flash-attn")
     set_default(nil)
@@ -247,8 +271,17 @@ option_end()
 
 if has_config("aten") then
     add_defines("ENABLE_ATEN")
-    if get_config("flash-attn") and get_config("flash-attn") ~= "" then
+    if has_config("iluvatar-gpu") then
+        add_defines("_GLIBCXX_USE_CXX11_ABI=0")
+    end
+    if get_config("flash-attn") and get_config("flash-attn") ~= ""
+       and (has_config("nv-gpu") or has_config("cambricon-mlu") or has_config("metax-gpu") or has_config("qy-gpu") or has_config("hygon-dcu") or has_config("ali-ppu")) then
         add_defines("ENABLE_FLASH_ATTN")
+    end
+    -- Ascend flash-attn: enabled when ascend-gpu + aten + flash-attn
+    if has_config("ascend-npu") and get_config("flash-attn") and get_config("flash-attn") ~= "" then
+        add_defines("ENABLE_FLASH_ATTN")
+        add_defines("ENABLE_ASCEND_FLASH_ATTN")
     end
 end
 
@@ -273,6 +306,220 @@ option_end()
 
 if has_config("ccl") then
     add_defines("ENABLE_CCL")
+end
+
+-- InfiniOps
+option("infiniops")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Whether to use InfiniOps kernels where adapters are available")
+option_end()
+
+option("infiniops-root")
+    set_default("")
+    set_showmenu(true)
+    set_description("Path to an installed InfiniOps prefix used by --infiniops")
+option_end()
+
+option("infinirt-root")
+    set_default("")
+    set_showmenu(true)
+    set_description("Path to an installed standalone InfiniRT prefix used by --infiniops")
+option_end()
+
+local function get_standalone_infinirt_root()
+    local infinirt_root = get_config("infinirt-root")
+    if not infinirt_root or infinirt_root == "" then
+        infinirt_root = os.getenv("INFINI_RT_ROOT")
+    end
+    if infinirt_root and infinirt_root ~= "" then
+        return path.absolute(infinirt_root, os.projectdir())
+    end
+    return nil
+end
+
+local function get_standalone_infiniops_root()
+    local infiniops_root = get_config("infiniops-root")
+    if not infiniops_root or infiniops_root == "" then
+        infiniops_root = os.getenv("INFINI_OPS_ROOT")
+    end
+    if not infiniops_root or infiniops_root == "" then
+        infiniops_root = os.getenv("INFINI_ROOT")
+    end
+    if not infiniops_root or infiniops_root == "" then
+        local home = os.getenv(is_host("windows") and "HOMEPATH" or "HOME")
+        infiniops_root = path.join(home, ".infini")
+    end
+    return path.absolute(infiniops_root, os.projectdir())
+end
+
+local function find_installed_library(root, name)
+    for _, libdir in ipairs({"lib", "lib64"}) do
+        local library = path.join(root, libdir, name)
+        if os.isfile(library) then
+            return library
+        end
+    end
+    raise("Installed library not found under " .. root .. ": " .. name)
+end
+
+local function stage_infiniops_runtime(xmake_os, destination)
+    local infiniops_root = get_standalone_infiniops_root()
+    local infiniops_lib = find_installed_library(infiniops_root, "libinfiniops.so")
+    local staged_infiniops = path.join(destination, "libinfiniops.so")
+    xmake_os.mkdir(destination)
+    if path.absolute(infiniops_lib) ~= path.absolute(staged_infiniops) then
+        xmake_os.cp(infiniops_lib, staged_infiniops)
+    end
+
+    local infinirt_root = get_standalone_infinirt_root()
+    if infinirt_root then
+        local standalone_infinirt = find_installed_library(infinirt_root, "libinfinirt.so")
+        local private_soname = "libinfiniops_infinirt.so"
+        local private_infinirt = path.join(destination, private_soname)
+        xmake_os.cp(standalone_infinirt, private_infinirt)
+        xmake_os.execv("patchelf", {"--set-soname", private_soname, private_infinirt})
+        xmake_os.execv("patchelf", {"--replace-needed", standalone_infinirt, private_soname, staged_infiniops})
+        xmake_os.execv("patchelf", {"--replace-needed", "libinfinirt.so", private_soname, staged_infiniops})
+    end
+end
+
+if has_config("infiniops") then
+    local cmake_prefixes = {get_standalone_infiniops_root()}
+    local infinirt_root = get_standalone_infinirt_root()
+    if infinirt_root then
+        table.insert(cmake_prefixes, infinirt_root)
+    end
+    add_requires("cmake::InfiniOps", {
+        alias = "infiniops",
+        system = true,
+        configs = {
+            search_mode = "config",
+            envs = {
+                CMAKE_PREFIX_PATH = table.concat(
+                    cmake_prefixes, is_host("windows") and ";" or ":")
+            },
+            link_libraries = {"InfiniOps::infiniops"}
+        }
+    })
+end
+
+local function infiniops_selection_includes_slot(selection, slot)
+    if type(selection) ~= "table" then
+        return false
+    end
+
+    local implementations = selection.implementations
+    if implementations == "all" then
+        return true
+    end
+    if type(implementations) ~= "table" then
+        return false
+    end
+
+    for _, implementation in ipairs(implementations) do
+        if implementation == slot then
+            return true
+        end
+    end
+    return false
+end
+
+local function configure_infiniops_ops(infiniops_ops, xmake_os, json)
+    if not infiniops_ops or #infiniops_ops == 0 then
+        return nil, false, false
+    end
+
+    infiniops_ops = infiniops_ops:trim()
+    if #infiniops_ops == 0 then
+        return nil, false, false
+    end
+
+    if infiniops_ops:lower():match("%.json$") then
+        local config_path = path.absolute(infiniops_ops, os.projectdir())
+        if not xmake_os.isfile(config_path) then
+            xmake_os.raise("InfiniOps ops config not found: " .. config_path)
+        end
+
+        local selection = json.loadfile(config_path)
+        if type(selection) ~= "table" then
+            xmake_os.raise("InfiniOps ops config must contain a JSON object: " .. config_path)
+        end
+
+        local linked_device = has_config("nv-gpu") or has_config("metax-gpu")
+        local with_linked_flash_attn_with_kvcache = linked_device
+            and infiniops_selection_includes_slot(selection.flash_attn_with_kvcache, 16)
+        local with_linked_flash_attn_varlen_func = linked_device
+            and infiniops_selection_includes_slot(selection.flash_attn_varlen_func, 16)
+        return selection,
+               with_linked_flash_attn_with_kvcache,
+               with_linked_flash_attn_varlen_func
+    end
+
+    local selection = {}
+    local with_linked_flash_attn_with_kvcache = false
+    local with_linked_flash_attn_varlen_func = false
+    for _, op in ipairs(infiniops_ops:split("[,;]")) do
+        op = op:trim()
+        if #op > 0 then
+            local use_linked_implementation = false
+            if (has_config("nv-gpu") or has_config("metax-gpu")) and op == "flash_attn_with_kvcache" then
+                with_linked_flash_attn_with_kvcache = true
+                use_linked_implementation = true
+            end
+            if (has_config("nv-gpu") or has_config("metax-gpu")) and op == "flash_attn_varlen_func" then
+                with_linked_flash_attn_varlen_func = true
+                use_linked_implementation = true
+            end
+            local implementations = "all"
+            if use_linked_implementation then
+                implementations = {16}
+            elseif has_config("ascend-npu") and op == "argmax" then
+                implementations = {0}
+            elseif op == "argmax" or op == "index_select" then
+                implementations = {8}
+            elseif op == "rms_norm" or op == "silu_and_mul" or op == "topk_softmax" then
+                implementations = {0}
+            end
+            selection[op] = {implementations = implementations}
+        end
+    end
+
+    return selection, with_linked_flash_attn_with_kvcache,
+           with_linked_flash_attn_varlen_func
+end
+
+local infiniops_adapter_dependencies = {
+    add_rms_norm = {"copy", "fused_add_rms_norm"},
+    conv2d = {"convolution"},
+    gelutanh = {"gelu"},
+    paged_attention = {"flash_attn_with_kvcache"},
+    paged_caching = {"reshape_and_cache_flash"},
+    rearrange = {"copy"},
+    select_last_token_hidden = {"add", "index_select"},
+    topksoftmax = {"topk_softmax"}
+}
+
+local function is_infiniops_adapter_selected(adapter_name, selected_ops)
+    local dependencies = infiniops_adapter_dependencies[adapter_name]
+                         or {adapter_name}
+    for _, dependency in ipairs(dependencies) do
+        if not selected_ops[dependency] then
+            return false
+        end
+    end
+    return true
+end
+
+-- Mutual Awareness Analyzer
+option("mutual-awareness")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Enable hardware-task mutual awareness analyzer and goal-aware kernel dispatch")
+option_end()
+
+if has_config("mutual-awareness") then
+    add_defines("ENABLE_MUTUAL_AWARENESS")
 end
 
 target("infini-utils")
@@ -350,6 +597,28 @@ target_end()
 target("infiniop")
     set_kind("shared")
     add_deps("infinirt")
+
+    local public_cuda_root = get_config("cuda") or os.getenv("CUDA_HOME") or os.getenv("CUDA_PATH")
+    if public_cuda_root and public_cuda_root ~= "" then
+        for _, include_dir in ipairs({
+            path.join(public_cuda_root, "include"),
+            path.join(public_cuda_root, "targets", "x86_64-linux", "include"),
+        }) do
+            if os.isdir(include_dir) then
+                add_includedirs(include_dir)
+            end
+        end
+        for _, link_dir in ipairs({
+            path.join(public_cuda_root, "lib64"),
+            path.join(public_cuda_root, "targets", "x86_64-linux", "lib"),
+        }) do
+            if os.isdir(link_dir) then
+                add_linkdirs(link_dir)
+            end
+        end
+    elseif has_config("nv-gpu") then
+        add_includedirs(path.join("/usr/local/cuda", "include"))
+    end
 
     if has_config("cpu") then
         add_deps("infiniop-cpu")
@@ -464,7 +733,97 @@ target("infinicore_cpp_api")
     local INFINI_ROOT = os.getenv("INFINI_ROOT") or (os.getenv(is_host("windows") and "HOMEPATH" or "HOME") .. "/.infini")
 
     add_includedirs("include")
+    if has_config("metax-gpu") and has_config("use-mc") and has_config("aten") then
+        local maca_root = os.getenv("MACA_PATH") or os.getenv("MACA_HOME") or os.getenv("MACA_ROOT") or "/opt/maca"
+        add_includedirs(maca_root .. "/include")
+        add_includedirs(maca_root .. "/tools/cu-bridge/include")
+        for _, include_dir in ipairs(os.dirs(maca_root .. "/include/*")) do
+            add_includedirs(include_dir)
+        end
+        add_cxflags("-include", "climits")
+        add_cxxflags("-includeclimits", {force = true})
+        add_defines("CHAR_BIT=8", "INT_MIN=(-2147483647 - 1)", "INT_MAX=2147483647", "UINT_MAX=4294967295U")
+    end
     add_includedirs(INFINI_ROOT.."/include", { public = true })
+    if has_config("nv-gpu") or has_config("iluvatar-gpu") or has_config("ali-ppu") then
+        local cuda_root = os.getenv("CUDA_HOME") or os.getenv("CUDA_PATH") or get_config("cuda") or "/usr/local/cuda"
+        add_includedirs(cuda_root .. "/include")
+    end
+    if has_config("moore-gpu") then
+        local musa_root = os.getenv("MUSA_ROOT") or os.getenv("MUSA_HOME") or os.getenv("MUSA_PATH") or "/usr/local/musa"
+        add_includedirs(path.join(musa_root, "include"))
+    end
+    if has_config("ascend-npu") then
+        local ASCEND_HOME = os.getenv("ASCEND_HOME") or os.getenv("ASCEND_TOOLKIT_HOME")
+        add_includedirs(ASCEND_HOME .. "/include")
+        add_includedirs(ASCEND_HOME .. "/include/aclnn")
+        add_includedirs(ASCEND_HOME .. "/include/aclnnop")
+        add_includedirs(path.join(os.projectdir(), "submodules/InfiniOps/src"))
+        add_linkdirs(ASCEND_HOME .. "/lib64")
+        add_links("ascendcl", "nnopbase", "opapi", "runtime")
+        add_linkdirs(ASCEND_HOME .. "/../../driver/lib64/driver")
+        add_links("ascend_hal")
+    end
+    if has_config("infiniops") then
+        local infiniops_root = get_standalone_infiniops_root()
+        add_packages("infiniops")
+        add_defines("ENABLE_INFINIOPS_API")
+        add_rpathdirs(INFINI_ROOT .. "/lib")
+        add_rpathdirs(path.join(infiniops_root, "lib"),
+                      path.join(infiniops_root, "lib64"))
+        on_load(function (target)
+            local json = import("core.base.json")
+            local selected_ops, with_linked_flash_attn_with_kvcache, with_linked_flash_attn_varlen_func = configure_infiniops_ops(
+                os.getenv("INFINI_OPS_OPS"), os, json)
+            if with_linked_flash_attn_with_kvcache then
+                target:add("defines", "ENABLE_INFINIOPS_LINKED_FLASH_ATTN_WITH_KVCACHE")
+            end
+            if with_linked_flash_attn_varlen_func then
+                target:add("defines", "ENABLE_INFINIOPS_LINKED_FLASH_ATTN_VARLEN_FUNC")
+            end
+            if has_config("cambricon-mlu") and has_config("aten") then
+                local torch_mlu_dir = os.iorunv(PYTHON, {
+                    "-c",
+                    "import torch_mlu, os; print(os.path.dirname(torch_mlu.__file__))",
+                }):trim()
+                local torch_cxx11_abi = os.iorunv(PYTHON, {
+                    "-c",
+                    "import torch; print(1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0)",
+                }):trim()
+
+                target:add(
+                    "defines",
+                    "_GLIBCXX_USE_CXX11_ABI=" .. torch_cxx11_abi)
+                target:add(
+                    "includedirs",
+                    path.join(torch_mlu_dir, "csrc"),
+                    path.join(torch_mlu_dir, "csrc", "include"),
+                    {public = true})
+            end
+
+            if selected_ops then
+                for _, adapter_file in ipairs(os.files("src/infinicore/ops/*/*_infiniops.cc")) do
+                    local adapter_name =
+                        path.filename(adapter_file):match("^(.-)_infiniops%.cc$")
+                    if not is_infiniops_adapter_selected(adapter_name,
+                                                         selected_ops) then
+                        target:remove("files", adapter_file)
+                    end
+                end
+            else
+                target:remove(
+                    "files",
+                    "src/infinicore/ops/paged_attention/paged_attention_infiniops.cc")
+            end
+        end)
+        after_install(function (target)
+            local install_libdir = path.join(INFINI_ROOT, "lib")
+            os.cp(
+                target:dep("infinirt"):targetfile(),
+                path.join(install_libdir, "libinfinirt.so"))
+            stage_infiniops_runtime(os, install_libdir)
+        end)
+    end
 
     add_linkdirs(INFINI_ROOT.."/lib")
     add_links("infiniop", "infinirt", "infiniccl")
@@ -480,13 +839,34 @@ target("infinicore_cpp_api")
         if has_config("qy-gpu") then
             add_deps("flash-attn-qy")
         end
+        if has_config("hygon-dcu") then
+            add_deps("flash-attn-hygon")
+        end
+        if has_config("cambricon-mlu") then
+            add_deps("flash-attn-cambricon")
+        end
+        if has_config("ali-ppu") then
+            add_deps("flash-attn-ali")
+        end
     end
 
     -- Flash pip `.so` link flags: `before_link` runs in an xmake sandbox that cannot see helpers
     -- from other included scripts; MetaX and QY each register their own hook in `xmake/metax.lua`
     -- and `xmake/qy.lua`.
 
+    -- Moore mate: 
+    -- enable Python bridge macro for flash-attn Moore path
+    -- pybind11/embed.h for mha_kvcache branch
+    if has_config("moore-gpu") and has_config("aten") and has_config("flash-attn") then
+        add_defines("ENABLE_MOORE_MATE_FLASH_ATTN")
+        add_packages("pybind11")
+    end
+
     before_build(function (target)
+        if has_config("infiniops") then
+            stage_infiniops_runtime(os, path.join(INFINI_ROOT, "lib"))
+        end
+
         -- MetaX + flash-attn: `flash_attn_2_cuda` may use a different `mha_fwd_kvcache` ABI
         -- depending on the underlying stack version. When building with MACA (`--use-mc=y`),
         -- the version file is typically `/opt/maca/Version.txt` (HPCC uses `/opt/hpcc/Version.txt`).
@@ -512,7 +892,7 @@ target("infinicore_cpp_api")
         end
 
         if has_config("aten") then
-            local outdata = os.iorunv("python", {"-c", "import torch, os; print(os.path.dirname(torch.__file__))"}):trim()
+            local outdata = os.iorunv(PYTHON, {"-c", "import torch, os; print(os.path.dirname(torch.__file__))"}):trim()
             local TORCH_DIR = outdata
 
             target:add(
@@ -526,17 +906,141 @@ target("infinicore_cpp_api")
                 path.join(TORCH_DIR, "lib"),
                 { public = true }
             )
-            target:add(
-                "links",
-                "torch",
-                "c10",
-                "torch_cuda",
-                "c10_cuda",
-                { public = true }
-            )
+
+            -- Moore mate: link torch_musa instead of torch_cuda/c10_cuda
+            if has_config("moore-gpu") then
+                target:add(
+                    "links",
+                    "torch",
+                    "torch_cpu",
+                    "torch_python",
+                    "c10",
+                    { public = true }
+                )
+
+                -- Detect torch_musa install path
+                local musa_outdata = os.iorunv(PYTHON, {"-c", "import torch_musa, os; print(os.path.dirname(torch_musa.__file__))"}):trim()
+                local TORCH_MUSA_DIR = musa_outdata
+                local MUSA_ROOT = os.getenv("MUSA_ROOT") or os.getenv("MUSA_HOME") or os.getenv("MUSA_PATH") or "/usr/local/musa"
+
+                target:add(
+                    "includedirs",
+                    path.join(MUSA_ROOT, "include"),
+                    path.directory(TORCH_MUSA_DIR),
+                    path.join(TORCH_MUSA_DIR, "include"),
+                    path.join(TORCH_MUSA_DIR, "share/generated_cuda_compatible/include"),
+                    path.join(TORCH_MUSA_DIR, "share/generated_cuda_compatible"),
+                    { public = true }
+                )
+
+                target:add(
+                    "linkdirs",
+                    path.join(TORCH_MUSA_DIR, "lib"),
+                    { public = true }
+                )
+                target:add(
+                    "links",
+                    "musa_python",
+                    "musa_kernels",
+                    { public = true }
+                )
+
+                -- libpython for pybind11::scoped_interpreter / embed
+                local pyinc = os.iorunv(PYTHON, {"-c",
+                    "import sysconfig; print(sysconfig.get_path('include'))"}):trim()
+                local pylib = os.iorunv(PYTHON, {"-c",
+                    "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))"}):trim()
+                local pyver = os.iorunv(PYTHON, {"-c",
+                    "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"}):trim()
+                target:add("includedirs", pyinc, { public = true })
+                target:add("linkdirs",    pylib, { public = true })
+                target:add("links",       "python" .. pyver, { public = true })
+
+                target:add(
+                    "shflags",
+                    "-Wl,-rpath," .. path.join(TORCH_MUSA_DIR, "lib"),
+                    "-Wl,-rpath," .. path.join(MUSA_ROOT, "lib"),
+                    "-Wl,-rpath," .. path.join(TORCH_DIR, "lib"),
+                    "-Wl,-rpath," .. pylib,
+                    { force = true }
+                )
+            elseif has_config("ascend-npu") then
+                target:add(
+                    "links",
+                    "torch",
+                    "torch_cpu",
+                    "c10",
+                    { public = true }
+                )
+                -- Detect torch_npu install path
+                local npu_outdata = os.iorunv(PYTHON, {"-c", "import torch_npu, os; print(os.path.dirname(torch_npu.__file__))"}):trim()
+                local TORCH_NPU_DIR = npu_outdata
+                target:add(
+                    "linkdirs",
+                    path.join(TORCH_NPU_DIR, "lib"),
+                    { public = true }
+                )
+                target:add(
+                    "links",
+                    "torch_npu",
+                    { public = true }
+                )
+                target:add(
+                    "shflags",
+                    "-Wl,-rpath," .. path.join(TORCH_NPU_DIR, "lib"),
+                    "-Wl,-rpath," .. path.join(TORCH_DIR, "lib"),
+                    { force = true }
+                ) 
+            elseif has_config("hygon-dcu") then
+                target:add(
+                    "links",
+                    "torch",
+                    "torch_cpu",
+                    "torch_python",
+                    "c10",
+                    "torch_hip",
+                    "c10_hip",
+                    { public = true }
+                )
+            elseif has_config("cambricon-mlu") then
+                target:add(
+                    "links",
+                    "torch",
+                    "torch_cpu",
+                    "c10",
+                    { public = true }
+                )
+            else
+                target:add(
+                    "links",
+                    "torch",
+                    "c10",
+                    "torch_cuda",
+                    "c10_cuda",
+                    { public = true }
+                )
+            end
         end
 
     end)
+
+    -- Moore mate: force link torch_python to bypass --as-needed
+    if has_config("moore-gpu") and has_config("aten") then
+        before_link(function (target)
+            local torch_dir = os.iorunv(PYTHON, {"-c",
+                "import torch, os; print(os.path.dirname(torch.__file__))"}):trim()
+            local torch_lib = path.join(torch_dir, "lib")
+            target:add("shflags",
+                "-Wl,--no-as-needed",
+                "-L" .. torch_lib,
+                "-ltorch_python",
+                "-ltorch_cpu",
+                "-lc10",
+                "-Wl,--as-needed",
+                "-Wl,-rpath," .. torch_lib,
+                {force = true})
+        end)
+    end
 
     -- Add InfiniCore C++ source files (needed for RoPE and other nn modules)
     add_files("src/infinicore/*.cc")
@@ -548,6 +1052,22 @@ target("infinicore_cpp_api")
     add_files("src/infinicore/nn/*.cc")
     add_files("src/infinicore/ops/*/*.cc")
     add_files("src/infinicore/ops/*/*/*.cc")
+    add_files("src/infinicore/ops/*/*/*/*.cc")
+    -- Platform-private Hygon sources are guarded and only kept in Hygon builds.
+    if has_config("hygon-dcu") and get_config("flash-attn") and get_config("flash-attn") ~= "" then
+        -- Hygon links against a prebuilt flash-attn extension with a different ABI.
+        -- Keep the platform-specific implementation under each op's hygon/ folder.
+        add_files("src/infinicore/adaptor/flash_attn/hygon/*.cc")
+    else
+        remove_files("src/infinicore/ops/*/hygon/*.cc")
+    end
+    if has_config("infiniops") and not has_config("nv-gpu")
+        and not has_config("cambricon-mlu") then
+        remove_files("src/infinicore/ops/paged_attention/paged_attention_infiniops.cc")
+    end
+    if has_config("mutual-awareness") then
+        add_files("src/infinicore/analyzer/*.cc")
+    end
     add_files("src/utils/*.cc")
 
     set_installdir(INFINI_ROOT)
@@ -584,6 +1104,14 @@ target("_infinicore")
 
     add_files("src/infinicore/pybind11/**.cc")
 
+    if has_config("infiniops") then
+        add_rpathdirs(INFINI_ROOT .. "/lib")
+        after_install(function ()
+            stage_infiniops_runtime(
+                os, path.join(os.projectdir(), "python", "infinicore", "lib"))
+        end)
+    end
+
     set_installdir("python/infinicore")
 target_end()
 
@@ -607,7 +1135,7 @@ target("infinicore")
             table.insert(pip_install_args, "--editable")
         end
 
-        os.execv("python", table.join({"-m", "pip", "install"}, pip_install_args, {"."}))
+        os.execv(PYTHON, table.join({"-m", "pip", "install"}, pip_install_args, {"."}))
     end)
 target_end()
 

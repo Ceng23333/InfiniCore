@@ -58,6 +58,11 @@ void Parameter::load_blob(const void *data) {
 }
 
 void Parameter::load(const Tensor &tensor) {
+    load_no_sync(tensor);
+    infinicore::context::syncStream();
+}
+
+void Parameter::load_no_sync(const Tensor &tensor) {
     if (impl_->dtype() != tensor->dtype()) {
         throw std::runtime_error("Dtype mismatch when loading tensor into parameter. Weight: " + impl_->info() + ", Tensor: " + tensor->info() + ".");
     }
@@ -67,13 +72,25 @@ void Parameter::load(const Tensor &tensor) {
     if (num_shards_ == 0 || num_shards_ >= tp_size_) {
         expected_shape[tp_dim_] *= tp_size_;
 
+        Tensor source_tensor = tensor;
         if (expected_shape != tensor->shape()) {
-            throw std::runtime_error("Shape mismatch when loading tensor into parameter. Weight: " + impl_->info() + ", Tensor: " + tensor->info() + ".");
+            bool degenerate_2d_transpose = false;
+            const auto &actual_shape = tensor->shape();
+            if (expected_shape.size() == 2 && actual_shape.size() == 2
+                && expected_shape[0] == actual_shape[1]
+                && expected_shape[1] == actual_shape[0]
+                && (expected_shape[0] == 1 || expected_shape[1] == 1)) {
+                degenerate_2d_transpose = true;
+            }
+            if (!degenerate_2d_transpose) {
+                throw std::runtime_error("Shape mismatch when loading tensor into parameter. Weight: " + impl_->info() + ", Tensor: " + tensor->info() + ".");
+            }
+            source_tensor = tensor->is_contiguous() ? tensor->view(expected_shape) : tensor->contiguous()->view(expected_shape);
         }
         if (tp_size_ > 1) {
-            impl_->copy_from(tensor->narrow({{tp_dim_, tp_rank_ * impl_->size(tp_dim_), impl_->size(tp_dim_)}}));
+            impl_->copy_from(source_tensor->narrow({{tp_dim_, tp_rank_ * impl_->size(tp_dim_), impl_->size(tp_dim_)}}));
         } else {
-            impl_->copy_from(tensor);
+            impl_->copy_from(source_tensor);
         }
     } else {
         if (num_shards_ == 0) {
@@ -97,7 +114,5 @@ void Parameter::load(const Tensor &tensor) {
 
         impl_->copy_from(tensor->narrow({{tp_dim_, offset, shard_size}}));
     }
-
-    infinicore::context::syncStream();
 }
 } // namespace infinicore::nn

@@ -116,6 +116,23 @@ __INFINI_C infiniStatus_t infinirtSetDevice(infiniDevice_t device, int device_id
                                    CURRENT_DEVICE_ID = device_id; });
 }
 
+__INFINI_C infiniStatus_t infinirtGetMemInfo(infiniDevice_t device, int device_id, size_t *free_bytes, size_t *total_bytes) {
+    if (free_bytes == nullptr || total_bytes == nullptr) {
+        return INFINI_STATUS_NULL_POINTER;
+    }
+    INFINIRT_CALL_DEVICE_API_AND(device, getMemInfo, (device_id, free_bytes, total_bytes), {});
+}
+
+__INFINI_C infiniStatus_t infinirtGetDeviceResourceSnapshot(
+    infiniDevice_t device,
+    int device_id,
+    infinirtDeviceResourceSnapshot_t *snapshot) {
+    if (snapshot == nullptr) {
+        return INFINI_STATUS_NULL_POINTER;
+    }
+    INFINIRT_CALL_DEVICE_API_AND(device, getDeviceResourceSnapshot, (device_id, snapshot), {});
+}
+
 __INFINI_C infiniStatus_t infinirtDeviceSynchronize() {
     INFINIRT_CALL_DEVICE_API(deviceSynchronize, ());
 }
@@ -194,6 +211,14 @@ __INFINI_C infiniStatus_t infinirtMallocAsync(void **p_ptr, size_t size, infinir
 
 __INFINI_C infiniStatus_t infinirtFreeAsync(void *ptr, infinirtStream_t stream) {
     INFINIRT_CALL_DEVICE_API(freeAsync, (ptr, stream));
+}
+
+__INFINI_C __export infiniStatus_t infinirtMemset(void *ptr, int value, size_t count) {
+    INFINIRT_CALL_DEVICE_API(memsetDevice, (ptr, value, count));
+}
+
+__INFINI_C __export infiniStatus_t infinirtMemsetAsync(void *ptr, int value, size_t count, infinirtStream_t stream) {
+    INFINIRT_CALL_DEVICE_API(memsetDeviceAsync, (ptr, value, count, stream));
 }
 
 __INFINI_C infiniStatus_t infinirtStreamBeginCapture(infinirtStream_t stream, infinirtStreamCaptureMode_t mode) {

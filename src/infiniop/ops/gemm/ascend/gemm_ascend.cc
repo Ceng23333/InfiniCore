@@ -31,6 +31,9 @@ struct Descriptor::Opaque {
     // see doc:
     // https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/80RC3alpha002/apiref/appdevgapi/context/aclnnBatchMatMul.md
     int8_t mt;
+    // whether B is handed to aclnnGemm as a contiguous [out, in] tensor with
+    // transB=1 (see Descriptor::create); 0 = original behaviour (transB = 0).
+    int8_t transB;
     // alpha&beta hashmap
     std::unordered_map<std::pair<float, float>, aclOpExecutor *, FloatPairHash, FloatPairEqual> lookup;
 
@@ -58,9 +61,7 @@ infiniStatus_t Descriptor::create(
     auto handle = reinterpret_cast<device::ascend::Handle *>(handle_);
     auto dtype = c_desc->dtype();
 
-    if (dtype != INFINI_DTYPE_F16 && dtype != INFINI_DTYPE_F32) {
-        return INFINI_STATUS_BAD_TENSOR_DTYPE;
-    }
+    CHECK_DTYPE(dtype, INFINI_DTYPE_F16, INFINI_DTYPE_BF16, INFINI_DTYPE_F32);
 
     auto result = MatmulInfo::create(c_desc, a_desc, b_desc, MatrixLayout::ROW_MAJOR);
     CHECK_RESULT(result);
@@ -72,9 +73,26 @@ infiniStatus_t Descriptor::create(
     auto a = new aclnnTensorDescriptor(toAclDataType(a_desc->dtype()),
                                        {static_cast<int64_t>(info.a_matrix.rows), static_cast<int64_t>(info.a_matrix.cols)},
                                        {info.a_matrix.row_stride, info.a_matrix.col_stride});
-    auto b = new aclnnTensorDescriptor(toAclDataType(b_desc->dtype()),
-                                       {static_cast<int64_t>(info.b_matrix.rows), static_cast<int64_t>(info.b_matrix.cols)},
-                                       {info.b_matrix.row_stride, info.b_matrix.col_stride});
+    // The common Linear case stores the weight physically as [out, in] row-major
+    // and views it here as a logical [in, out] column-major matrix (row_stride == 1).
+    // Passing that column-major view to aclnnGemm with transB = 0 makes it emit a
+    // physical Transpose kernel on every launch -- this dominated runtime (~60%).
+    // Instead, describe the SAME memory as a contiguous [out, in] tensor and set
+    // transB = 1, so the cube core handles the transpose via addressing (no kernel).
+    // Mathematically identical; only affects Ascend. For any other B layout, keep
+    // the original behaviour (transB = 0).
+    bool trans_b = false;
+    aclnnTensorDescriptor *b;
+    if (info.b_matrix.row_stride == 1 && info.b_matrix.col_stride > 1) {
+        b = new aclnnTensorDescriptor(toAclDataType(b_desc->dtype()),
+                                      {static_cast<int64_t>(info.b_matrix.cols), static_cast<int64_t>(info.b_matrix.rows)},
+                                      {info.b_matrix.col_stride, info.b_matrix.row_stride});
+        trans_b = true;
+    } else {
+        b = new aclnnTensorDescriptor(toAclDataType(b_desc->dtype()),
+                                      {static_cast<int64_t>(info.b_matrix.rows), static_cast<int64_t>(info.b_matrix.cols)},
+                                      {info.b_matrix.row_stride, info.b_matrix.col_stride});
+    }
 
     auto tc = c->tensor,
          ta = a->tensor,
@@ -84,10 +102,10 @@ infiniStatus_t Descriptor::create(
     aclOpExecutor *executor = nullptr;
     size_t workspace_size = 0;
     int8_t mt = 1;
-    CHECK_ACL(aclnnGemmGetWorkspaceSize(ta, tb, tc, 1., 0., 0, 0, tc, mt, &workspace_size, &executor));
+    CHECK_ACL(aclnnGemmGetWorkspaceSize(ta, tb, tc, 1., 0., 0, trans_b ? 1 : 0, tc, mt, &workspace_size, &executor));
     CHECK_ACL(aclSetAclOpExecutorRepeatable(executor));
     lookup[std::make_pair(1.0f, 0.0f)] = executor;
-    CHECK_ACL(aclnnGemmGetWorkspaceSize(ta, tb, tc, 1., 1., 0, 0, tc, mt, &workspace_size, &executor));
+    CHECK_ACL(aclnnGemmGetWorkspaceSize(ta, tb, tc, 1., 1., 0, trans_b ? 1 : 0, tc, mt, &workspace_size, &executor));
     CHECK_ACL(aclSetAclOpExecutorRepeatable(executor));
     lookup[std::make_pair(1.0f, 1.0f)] = executor;
 
@@ -98,6 +116,7 @@ infiniStatus_t Descriptor::create(
             a,
             b,
             mt,
+            static_cast<int8_t>(trans_b ? 1 : 0),
             std::move(lookup)},
         handle->device, handle->device_id);
 
@@ -125,7 +144,7 @@ infiniStatus_t Descriptor::calculate(
         executor = _opaque->lookup[key];
     } else {
         CHECK_ACL(aclnnGemmGetWorkspaceSize(
-            ta, tb, tc, alpha, beta, 0, 0, tc, _opaque->mt,
+            ta, tb, tc, alpha, beta, 0, _opaque->transB, tc, _opaque->mt,
             &workspace_size, &executor));
         CHECK_ACL(aclSetAclOpExecutorRepeatable(executor));
         _opaque->lookup[key] = executor;
