@@ -34,6 +34,9 @@ mha_fwd(at::Tensor &q,                   // batch_size x seqlen_q x num_heads x 
         // MetaX/Mars `flash_attn_2_cuda` (e.g. 2.6.x+mars) appends this argument vs upstream Dao-AILab flash-attn.
         ,
         std::optional<at::Tensor> &flash_attn_mars_ext_
+        // MACA 3.8 / vllm-metax flash_attn_2_cuda adds an extra trailing bool.
+        ,
+        bool flash_attn_mars_ext_flag_ = false
 #endif
 );
 
@@ -63,6 +66,9 @@ mha_varlen_fwd(at::Tensor &q,                               // total_q x num_hea
                // MetaX/Mars `flash_attn_2_cuda` (e.g. 2.6.x+mars) appends this argument vs upstream Dao-AILab flash-attn.
                ,
                std::optional<at::Tensor> &flash_attn_mars_ext_
+               // MACA 3.8 / vllm-metax flash_attn_2_cuda adds an extra trailing bool.
+               ,
+               bool flash_attn_mars_ext_flag_ = false
 #endif
 );
 

@@ -332,7 +332,8 @@ void run(void *planned_meta) {
         std::nullopt
 #if defined(ENABLE_METAX_API) && defined(INFINICORE_HPCC_VERSION_MAJOR) && (INFINICORE_HPCC_VERSION_MAJOR >= 3)
         ,
-        flash_attn_mars_ext
+        flash_attn_mars_ext,
+        false
 #endif
     );
 
