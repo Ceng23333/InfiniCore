@@ -16,6 +16,7 @@ set_encodings("utf-8")
 
 add_includedirs("include")
 add_includedirs("third_party/spdlog/include")
+add_includedirs("third_party/nlohmann_json/single_include")
 
 if is_mode("debug") then
     add_defines("DEBUG_MODE")
@@ -191,6 +192,9 @@ if has_config("metax-gpu") then
         add_defines("ENABLE_METAX_MC_API")
         -- MACA torch build expects USE_MACA for ATen headers (e.g. C10_WARP_SIZE).
         add_defines("USE_MACA")
+        -- MetaX flash_attn_2_cuda (MACA 3.x) appends flash_attn_mars_ext_; keep this
+        -- as a global define so cache/reconfigure cannot drop the ABI flag.
+        add_defines("INFINICORE_HPCC_VERSION_MAJOR=3")
     else
         -- HPCC torch build expects this for ATen headers on hpcc.
         add_defines("USE_HPCC")

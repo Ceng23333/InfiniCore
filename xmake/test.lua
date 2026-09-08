@@ -77,8 +77,9 @@ target("infinicore-test")
     add_linkdirs(INFINI_ROOT.."/lib")
     add_links("infiniop", "infinirt", "infiniccl")
 
-    -- Add spdlog support
+    -- Add spdlog / nlohmann support
     add_includedirs("third_party/spdlog/include")
+    add_includedirs("third_party/nlohmann_json/single_include")
     add_defines("SPDLOG_ACTIVE_LEVEL=0")  -- Enable all log levels
 
     add_files(os.projectdir().."/src/infinicore/*.cc")

@@ -59,6 +59,12 @@ target("infinicore_cpp_api")
 target_end()
 
 add_includedirs(MACA_ROOT .. "/include")
+-- cu-bridge cuda_driver_types.h includes "mc_runtime_types.h" (not mcr/...),
+-- so mcr must be on the include path for ATen/torch MetaX builds.
+add_includedirs(MACA_ROOT .. "/include/mcr")
+add_includedirs(MACA_ROOT .. "/include/common")
+-- Torch ATen CUDA headers include <cuda_runtime_api.h> from MetaX cu-bridge.
+add_includedirs(MACA_ROOT .. "/tools/cu-bridge/include")
 add_linkdirs(MACA_ROOT .. "/lib")
 if has_config("use-mc") then
     add_links("mcdnn", "mcblas", "mcruntime")
