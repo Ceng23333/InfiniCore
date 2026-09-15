@@ -41,7 +41,7 @@ if QY_ROOT ~= nil then
     add_linkdirs(QY_ROOT .. "/sdk/lib")
 end
 
-add_links("curt", "cublas", "cudnn")
+add_links("curt", "cublas", "cublasLt", "cudnn")
 set_languages("cxx17")
 add_cxxflags("-std=c++17")  -- 显式设置 C++17
 add_cuflags("--std=c++17",{force = true})  -- 确保 CUDA 编译器也使用 C++17
