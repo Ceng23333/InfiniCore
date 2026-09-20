@@ -1,7 +1,7 @@
 #ifndef __PAGED_ATTENTION_PREFILL_KERNEL_V2_CUH__
 #define __PAGED_ATTENTION_PREFILL_KERNEL_V2_CUH__
 
-#if defined(ENABLE_NVIDIA_API) || defined(ENABLE_ALI_API) || defined(ENABLE_ILUVATAR_API)
+#if defined(ENABLE_NVIDIA_API) || defined(ENABLE_ALI_API) || defined(ENABLE_ILUVATAR_API) || defined(ENABLE_HYGON_API) || defined(ENABLE_QY_API)
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
