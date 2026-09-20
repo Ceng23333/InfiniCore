@@ -10,11 +10,19 @@
 // called directly from the dedicated *._ascend.cc implementation files, so this header is only
 // included by the NVIDIA/MetaX/QY code paths.  We still guard the namespace below so that
 // existing code compiles unchanged when ENABLE_ASCEND_FLASH_ATTN is defined.
+//
+// Denglin (QY) flash_attn_2_cuda adds an extra "sinks" argument to mha_* entry points; the
+// Dao-AILab-compatible ABI is exported as *_no_sinks.
+#if defined(ENABLE_QY_API)
+#define INFINICORE_FA_SYM(name) name##_no_sinks
+#else
+#define INFINICORE_FA_SYM(name) name
+#endif
 #if !defined(ENABLE_METAX_API) && !defined(ENABLE_ASCEND_FLASH_ATTN)
 namespace flash {
 #endif
 std::vector<at::Tensor>
-mha_fwd(at::Tensor &q,                   // batch_size x seqlen_q x num_heads x round_multiple(head_size, 8)
+INFINICORE_FA_SYM(mha_fwd)(at::Tensor &q,                   // batch_size x seqlen_q x num_heads x round_multiple(head_size, 8)
         const at::Tensor &k,             // batch_size x seqlen_k x num_heads_k x round_multiple(head_size, 8)
         const at::Tensor &v,             // batch_size x seqlen_k x num_heads_k x round_multiple(head_size, 8)
         std::optional<at::Tensor> &out_, // batch_size x seqlen_q x num_heads x round_multiple(head_size, 8)
@@ -38,7 +46,7 @@ mha_fwd(at::Tensor &q,                   // batch_size x seqlen_q x num_heads x 
 );
 
 std::vector<at::Tensor>
-mha_varlen_fwd(at::Tensor &q,                               // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
+INFINICORE_FA_SYM(mha_varlen_fwd)(at::Tensor &q,                               // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
                const at::Tensor &k,                         // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
                const at::Tensor &v,                         // total_k x num_heads_k x head_size, total_k := \sum_{i=0}^{b} s_i or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
                std::optional<at::Tensor> &out_,             // total_q x num_heads x head_size, total_k := \sum_{i=0}^{b} s_i
@@ -114,7 +122,7 @@ mha_varlen_bwd(const at::Tensor &dout,                   // total_q x num_heads,
                std::optional<at::Tensor> &rng_state);
 
 std::vector<at::Tensor>
-mha_fwd_kvcache(at::Tensor &q,                                     // batch_size x seqlen_q x num_heads x head_size
+INFINICORE_FA_SYM(mha_fwd_kvcache)(at::Tensor &q,                                     // batch_size x seqlen_q x num_heads x head_size
                 const at::Tensor &kcache,                          // batch_size_c x seqlen_k x num_heads_k x head_size or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
                 const at::Tensor &vcache,                          // batch_size_c x seqlen_k x num_heads_k x head_size or num_blocks x page_block_size x num_heads_k x head_size if there's a block_table.
                 std::optional<const at::Tensor> &k_,               // batch_size x seqlen_knew x num_heads_k x head_size
@@ -144,4 +152,5 @@ mha_fwd_kvcache(at::Tensor &q,                                     // batch_size
 #if !defined(ENABLE_METAX_API) && !defined(ENABLE_ASCEND_FLASH_ATTN)
 } // namespace flash
 #endif
+#undef INFINICORE_FA_SYM
 #endif // ENABLE_FLASH_ATTN

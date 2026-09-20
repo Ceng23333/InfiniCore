@@ -178,6 +178,9 @@ namespace {
 // while NVIDIA `flash-attn-nvidia.so` uses `flash::mha_varlen_fwd`.
 #if defined(ENABLE_METAX_API)
 #define INFINICORE_FLASH_OP(name) ::name
+#elif defined(ENABLE_QY_API)
+// Denglin FA SO: Dao-AILab ABI is exported as *_no_sinks.
+#define INFINICORE_FLASH_OP(name) flash::name##_no_sinks
 #else
 #define INFINICORE_FLASH_OP(name) flash::name
 #endif

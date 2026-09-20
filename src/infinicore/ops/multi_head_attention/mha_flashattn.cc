@@ -42,9 +42,12 @@ namespace {
 
 // MetaX/hpcc pip `flash_attn_2_cuda` exports `mha_fwd` at global scope (no namespace),
 // while NVIDIA `flash-attn-nvidia.so` uses `flash::mha_fwd`.
-#if defined(ENABLE_FLASH_ATTN) && (defined(ENABLE_NVIDIA_API) || defined(ENABLE_METAX_API))
+#if defined(ENABLE_FLASH_ATTN) && (defined(ENABLE_NVIDIA_API) || defined(ENABLE_METAX_API) || defined(ENABLE_QY_API))
 #if defined(ENABLE_METAX_API)
 #define INFINICORE_FLASH_OP(name) ::name
+#elif defined(ENABLE_QY_API)
+// Denglin FA SO: Dao-AILab ABI is exported as *_no_sinks.
+#define INFINICORE_FLASH_OP(name) flash::name##_no_sinks
 #else
 #define INFINICORE_FLASH_OP(name) flash::name
 #endif
@@ -53,7 +56,7 @@ namespace {
 } // namespace
 
 void run(void *planned_meta) {
-#if defined(ENABLE_FLASH_ATTN) && (defined(ENABLE_NVIDIA_API) || defined(ENABLE_METAX_API))
+#if defined(ENABLE_FLASH_ATTN) && (defined(ENABLE_NVIDIA_API) || defined(ENABLE_METAX_API) || defined(ENABLE_QY_API))
     c10::cuda::CUDAStreamGuard guard(infinicore::adaptor::get_cuda_stream());
     auto *p = reinterpret_cast<PlannedMeta *>(planned_meta);
 
