@@ -286,6 +286,16 @@ python scripts/install.py [XMAKE_CONFIG_FLAGS]
   xmake install _infinicore
   ```
 
+##### 试验功能 -- 使用 QY GPU 平台预编译 flash-attn 能力
+
+  ```shell
+  # QY 链接镜像/环境中已安装的 Dao-AILab flash_attn_2_cuda 扩展（不现场编译）。
+  # --flash-attn 指向包含 flash_attn_2_cuda*.so 的 dist-packages/site-packages 目录。
+  # 默认 SO：/usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-x86_64-linux-gnu.so
+  # 可通过 FLASH_ATTN_2_CUDA_SO 覆盖具体 .so 路径。
+  xmake f --qy-gpu=true --ccl=true --aten=y --cuda=$CUDA_HOME --flash-attn=/usr/local/lib/python3.12/dist-packages -cv
+  ```
+
 ##### 试验功能 -- 使用阿里 PPU 平台预编译 flash-attn 能力
 
   ```shell

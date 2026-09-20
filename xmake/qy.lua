@@ -21,8 +21,8 @@ local function _qy_flash_attn_cuda_so_path()
     -- Second priority: allow overriding the "expected" container path via env.
     local container_path = os.getenv("FLASH_ATTN_QY_CUDA_SO_CONTAINER")
     if not container_path or container_path == "" then
-        raise("Error: Flash Attention SO path not specified!\n")
-end
+        container_path = "/usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-x86_64-linux-gnu.so"
+    end
 
     if not os.isfile(container_path) then
         print(
