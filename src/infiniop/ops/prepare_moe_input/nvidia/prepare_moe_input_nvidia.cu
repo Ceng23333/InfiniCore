@@ -1,4 +1,4 @@
-#ifdef ENABLE_NVIDIA_API
+#if defined(ENABLE_NVIDIA_API) || defined(ENABLE_QY_API)
 
 #include "prepare_moe_input_nvidia.cuh"
 

@@ -7,7 +7,7 @@
  * Licensed under the Apache License, Version 2.0.
  */
 
-#if defined(ENABLE_NVIDIA_API) || defined(ENABLE_ILUVATAR_API) || defined(ENABLE_HYGON_API)
+#if defined(ENABLE_NVIDIA_API) || defined(ENABLE_ILUVATAR_API) || defined(ENABLE_HYGON_API) || defined(ENABLE_QY_API)
 
 #include "moe_topk_sigmoid_nvidia.cuh"
 

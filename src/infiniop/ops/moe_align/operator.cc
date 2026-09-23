@@ -2,7 +2,7 @@
 #include "../../handle.h"
 #include "infiniop/ops/moe_align.h"
 
-#if defined(ENABLE_NVIDIA_API) || defined(ENABLE_ALI_API)
+#if defined(ENABLE_NVIDIA_API) || defined(ENABLE_ALI_API) || defined(ENABLE_QY_API)
 #include "nvidia/moe_align_nvidia.cuh"
 #endif
 
@@ -35,6 +35,9 @@ __INFINI_C infiniStatus_t infiniopCreateMoeAlignDescriptor(
 #ifdef ENABLE_ALI_API
         CREATE(INFINI_DEVICE_ALI, nvidia);
 #endif
+#ifdef ENABLE_QY_API
+        CREATE(INFINI_DEVICE_QY, nvidia);
+#endif
     default:
         return INFINI_STATUS_DEVICE_TYPE_NOT_SUPPORTED;
     }
@@ -57,6 +60,9 @@ __INFINI_C infiniStatus_t infiniopGetMoeAlignWorkspaceSize(
 #endif
 #ifdef ENABLE_ALI_API
         GET(INFINI_DEVICE_ALI, nvidia);
+#endif
+#ifdef ENABLE_QY_API
+        GET(INFINI_DEVICE_QY, nvidia);
 #endif
     default:
         return INFINI_STATUS_DEVICE_TYPE_NOT_SUPPORTED;
@@ -90,6 +96,9 @@ __INFINI_C infiniStatus_t infiniopMoeAlign(
 #ifdef ENABLE_ALI_API
         CALCULATE(INFINI_DEVICE_ALI, nvidia);
 #endif
+#ifdef ENABLE_QY_API
+        CALCULATE(INFINI_DEVICE_QY, nvidia);
+#endif
     default:
         return INFINI_STATUS_DEVICE_TYPE_NOT_SUPPORTED;
     }
@@ -111,6 +120,9 @@ __INFINI_C infiniStatus_t infiniopDestroyMoeAlignDescriptor(
 #endif
 #ifdef ENABLE_ALI_API
         DESTROY(INFINI_DEVICE_ALI, nvidia);
+#endif
+#ifdef ENABLE_QY_API
+        DESTROY(INFINI_DEVICE_QY, nvidia);
 #endif
     default:
         return INFINI_STATUS_DEVICE_TYPE_NOT_SUPPORTED;

@@ -632,12 +632,13 @@ target("infiniop")
     if has_config("qy-gpu") then
         add_deps("infiniop-qy")
         add_links("infiniop-qy")
-        add_files("build/.objs/infiniop-qy/rules/qy.cuda/src/infiniop/ops/*/nvidia/*.cu.o", {public = true})
-        add_files("build/.objs/infiniop-qy/rules/qy.cuda/src/infiniop/ops/*/*/nvidia/*.cu.o", {public = true})
-        add_files("build/.objs/infiniop-qy/rules/qy.cuda/src/infiniop/devices/nvidia/*.cu.o", {public = true})
-        add_files("build/.objs/infiniop-qy/rules/qy.cuda/src/infiniop/ops/*/qy/*.cu.o", {public = true})
-        add_files("build/.objs/infiniop-qy/rules/qy.cuda/src/infiniop/ops/*/*/qy/*.cu.o", {public = true})
-        add_files("build/.objs/infiniop-qy/rules/qy.cuda/src/infiniop/devices/qy/*.cu.o", {public = true})
+        add_rules("ignore.o")
+        add_files("build/.objs/infiniop-qy/rules/qy.cuda/src/infiniop/ops/*/nvidia/*.cu.o", {rules = "ignore.o", public = true})
+        add_files("build/.objs/infiniop-qy/rules/qy.cuda/src/infiniop/ops/*/*/nvidia/*.cu.o", {rules = "ignore.o", public = true})
+        add_files("build/.objs/infiniop-qy/rules/qy.cuda/src/infiniop/devices/nvidia/*.cu.o", {rules = "ignore.o", public = true})
+        add_files("build/.objs/infiniop-qy/rules/qy.cuda/src/infiniop/ops/*/qy/*.cu.o", {rules = "ignore.o", public = true})
+        add_files("build/.objs/infiniop-qy/rules/qy.cuda/src/infiniop/ops/*/*/qy/*.cu.o", {rules = "ignore.o", public = true})
+        add_files("build/.objs/infiniop-qy/rules/qy.cuda/src/infiniop/devices/qy/*.cu.o", {rules = "ignore.o", public = true})
     end
 
     if has_config("cambricon-mlu") then

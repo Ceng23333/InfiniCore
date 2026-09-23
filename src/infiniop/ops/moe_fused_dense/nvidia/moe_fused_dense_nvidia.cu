@@ -1,4 +1,4 @@
-#if defined(ENABLE_NVIDIA_API) || defined(ENABLE_ALI_API)
+#if defined(ENABLE_NVIDIA_API) || defined(ENABLE_ALI_API) || defined(ENABLE_QY_API)
 
 #include "moe_fused_dense_nvidia.cuh"
 
@@ -19,6 +19,12 @@
 #include <cutlass/gemm/kernel/default_gemm_grouped.h>
 #include <cutlass/half.h>
 #include <cutlass/layout/matrix.h>
+#endif
+
+#if defined(ENABLE_QY_API) && defined(ENABLE_CUDNN_API)
+// Denglin vendor fused-MoE (same backend as vLLM dl_platform_plugin / _dl_C).
+#include <dldnn_ext.h>
+#include <vector>
 #endif
 
 namespace op::moe_fused_dense::nvidia {
@@ -53,10 +59,7 @@ void *advance_workspace(uint8_t *&ptr, size_t &remaining, size_t bytes, size_t a
 }
 
 size_t workspace_size(const MoeFusedDenseInfo &info) {
-#ifndef ENABLE_CUTLASS_API
-    (void)info;
-    return 0;
-#else
+#if defined(ENABLE_CUTLASS_API)
     const size_t pairs = info.num_tokens * info.topk;
     const size_t rows = info.max_num_tokens_padded;
     const size_t dtype_size = info.dtype == INFINI_DTYPE_F16 ? sizeof(half) : sizeof(__nv_bfloat16);
@@ -73,6 +76,24 @@ size_t workspace_size(const MoeFusedDenseInfo &info) {
     bytes += align_up(info.num_experts * sizeof(int64_t), 16) * 4;
     bytes += align_up(sizeof(int), 16);
     return bytes + 256;
+#elif defined(ENABLE_QY_API) && defined(ENABLE_CUDNN_API)
+    // Match vLLM fused_experts_impl intermediates: cache1/2/3 + Denglin invoke WS.
+    const size_t m = info.num_tokens;
+    const size_t topk = info.topk;
+    const size_t h = info.hidden_size;
+    const size_t inter = info.intermediate_size;
+    const size_t dtype_size = info.dtype == INFINI_DTYPE_F16 ? sizeof(half) : sizeof(__nv_bfloat16);
+    size_t bytes = 0;
+    bytes += align_up(m * topk * inter * 2 * dtype_size, 16); // gate_up
+    bytes += align_up(m * topk * inter * dtype_size, 16);     // activated
+    bytes += align_up(m * topk * h * dtype_size, 16);         // expert outs
+    const size_t cudnn_floor = 64ull << 20;
+    const size_t cudnn_scale = m * topk * h * dtype_size * 4;
+    bytes += align_up(cudnn_floor > cudnn_scale ? cudnn_floor : cudnn_scale, 16);
+    return bytes + 256;
+#else
+    (void)info;
+    return 0;
 #endif
 }
 
@@ -472,6 +493,257 @@ infiniStatus_t launch_cutlass_gemm_grouped_device_meta(int problem_count,
 }
 #endif
 
+template <typename T>
+__global__ void moe_sum_general_kernel(const T *__restrict__ input,
+                                       T *__restrict__ output,
+                                       int num_tokens,
+                                       int topk,
+                                       int hidden_size) {
+    int token = blockIdx.x;
+    if (token >= num_tokens) {
+        return;
+    }
+    for (int h = threadIdx.x; h < hidden_size; h += blockDim.x) {
+        float sum = 0.0f;
+        for (int k = 0; k < topk; ++k) {
+            sum += to_float<T>(input[static_cast<size_t>(token * topk + k) * hidden_size + h]);
+        }
+        output[static_cast<size_t>(token) * hidden_size + h] = from_float<T>(sum);
+    }
+}
+
+#if defined(ENABLE_QY_API) && defined(ENABLE_CUDNN_API)
+
+struct TensorDescGuard {
+    cudnnTensorDescriptor_t desc = nullptr;
+    ~TensorDescGuard() {
+        if (desc) {
+            cudnnDestroyTensorDescriptor(desc);
+        }
+    }
+    TensorDescGuard() = default;
+    TensorDescGuard(const TensorDescGuard &) = delete;
+    TensorDescGuard &operator=(const TensorDescGuard &) = delete;
+    infiniStatus_t create() {
+        CHECK_CUDNN(cudnnCreateTensorDescriptor(&desc));
+        return INFINI_STATUS_SUCCESS;
+    }
+};
+
+infiniStatus_t set_contig_tensor_desc(cudnnTensorDescriptor_t desc,
+                                      cudnnDataType_t dtype,
+                                      const std::vector<int> &dims) {
+    std::vector<int> strides(dims.size());
+    int stride = 1;
+    for (int i = static_cast<int>(dims.size()) - 1; i >= 0; --i) {
+        strides[static_cast<size_t>(i)] = stride;
+        stride *= dims[static_cast<size_t>(i)];
+    }
+    CHECK_CUDNN(cudnnSetTensorNdDescriptor(
+        desc, dtype, static_cast<int>(dims.size()), dims.data(), strides.data()));
+    return INFINI_STATUS_SUCCESS;
+}
+
+// vLLM-style two-stage Denglin fused MoE: invoke(w13) -> SiLU/GLU -> invoke(w2) -> sum.
+template <typename T>
+infiniStatus_t calculate_qy_cudnn(const MoeFusedDenseInfo &info,
+                                  void *workspace,
+                                  size_t workspace_size_bytes,
+                                  void *output,
+                                  const void *hidden_states,
+                                  const void *w13,
+                                  const void *w2,
+                                  const void *topk_weights,
+                                  const void *topk_ids,
+                                  const void *sorted_token_ids,
+                                  const void *expert_ids,
+                                  const void *num_tokens_post_padded,
+                                  device::nvidia::Handle::Internal *internal,
+                                  cudaStream_t stream) {
+    const int m = static_cast<int>(info.num_tokens);
+    const int h = static_cast<int>(info.hidden_size);
+    const int e = static_cast<int>(info.num_experts);
+    const int inter = static_cast<int>(info.intermediate_size);
+    const int topk = static_cast<int>(info.topk);
+    const size_t dtype_size = sizeof(T);
+
+    // Recover moe_align block size (must match CudaFusedMoeRunner / InfiniLM align).
+    int block_size_m = static_cast<int>(
+        (info.max_num_tokens_padded + info.max_num_blocks - 1) / info.max_num_blocks);
+    if (block_size_m <= 0) {
+        block_size_m = 16;
+    }
+    // Denglin default tile from seeded MoE JSON (N/K); M must follow align.
+    constexpr int block_size_n = 64;
+    constexpr int block_size_k = 64;
+
+    uint8_t *ptr = reinterpret_cast<uint8_t *>(workspace);
+    size_t remaining = workspace_size_bytes;
+    auto *cache1 = reinterpret_cast<T *>(advance_workspace(
+        ptr, remaining, static_cast<size_t>(m) * topk * inter * 2 * dtype_size));
+    auto *cache2 = reinterpret_cast<T *>(advance_workspace(
+        ptr, remaining, static_cast<size_t>(m) * topk * inter * dtype_size));
+    auto *cache3 = reinterpret_cast<T *>(advance_workspace(
+        ptr, remaining, static_cast<size_t>(m) * topk * h * dtype_size));
+    if (!cache1 || !cache2 || !cache3) {
+        return INFINI_STATUS_INSUFFICIENT_WORKSPACE;
+    }
+    void *cudnn_ws = ptr;
+    size_t cudnn_ws_cap = remaining;
+
+    cudnnDataType_t compute_dtype = device::nvidia::getCudnnDtype(info.dtype);
+    cudnnDataType_t i32_dtype = CUDNN_DATA_INT32;
+    cudnnDataType_t f32_dtype = CUDNN_DATA_FLOAT;
+
+    return internal->useCudnn(stream, [&](cudnnHandle_t handle) -> infiniStatus_t {
+        TensorDescGuard a_desc, b_desc, c_desc, tw_desc, ti_desc, sorted_desc, expert_desc, ntp_desc;
+        CHECK_STATUS(a_desc.create());
+        CHECK_STATUS(b_desc.create());
+        CHECK_STATUS(c_desc.create());
+        CHECK_STATUS(tw_desc.create());
+        CHECK_STATUS(ti_desc.create());
+        CHECK_STATUS(sorted_desc.create());
+        CHECK_STATUS(expert_desc.create());
+        CHECK_STATUS(ntp_desc.create());
+
+        cudnnInvokeFusedMoeDescriptor_t invoke_desc = nullptr;
+        CHECK_CUDNN(cudnnCreateInvokeFusedMoeDescriptor(&invoke_desc));
+        struct InvokeDescGuard {
+            cudnnInvokeFusedMoeDescriptor_t d;
+            ~InvokeDescGuard() {
+                if (d) {
+                    cudnnDestroyInvokeFusedMoeDescriptor(d);
+                }
+            }
+        } invoke_guard{invoke_desc};
+
+        size_t *block_shape_ptr = nullptr;
+        // Stage 1: hidden @ w13 -> [M, topk, 2*inter], no routed-weight mul.
+        CHECK_CUDNN(cudnnSetInvokeFusedMoeDescriptor(
+            invoke_desc,
+            topk,
+            block_size_m,
+            block_size_n,
+            block_size_k,
+            CUDNN_INVOKE_FUSED_MOE_NO_DEQUANT,
+            /*has_zp=*/false,
+            /*has_bias=*/false,
+            /*mul_routed_weight=*/false,
+            block_shape_ptr));
+
+        CHECK_STATUS(set_contig_tensor_desc(a_desc.desc, compute_dtype, {m, h}));
+        CHECK_STATUS(set_contig_tensor_desc(b_desc.desc, compute_dtype, {e, inter * 2, h}));
+        // Match vLLM: C is [M, topk, N] and M := C.shape[0].
+        CHECK_STATUS(set_contig_tensor_desc(c_desc.desc, compute_dtype, {m, topk, inter * 2}));
+        CHECK_STATUS(set_contig_tensor_desc(tw_desc.desc, f32_dtype, {m, topk}));
+        CHECK_STATUS(set_contig_tensor_desc(ti_desc.desc, i32_dtype, {m, topk}));
+        CHECK_STATUS(set_contig_tensor_desc(
+            sorted_desc.desc, i32_dtype, {static_cast<int>(info.max_num_tokens_padded)}));
+        CHECK_STATUS(set_contig_tensor_desc(
+            expert_desc.desc, i32_dtype, {static_cast<int>(info.max_num_blocks)}));
+        CHECK_STATUS(set_contig_tensor_desc(ntp_desc.desc, i32_dtype, {1}));
+
+        size_t need_ws = 0;
+        CHECK_CUDNN(cudnnGetInvokeFusedMoeKernelWorkspaceSizeV3(
+            handle,
+            a_desc.desc, hidden_states,
+            b_desc.desc, w13,
+            c_desc.desc, cache1,
+            nullptr, nullptr,
+            nullptr, nullptr,
+            tw_desc.desc, topk_weights,
+            ti_desc.desc, topk_ids,
+            sorted_desc.desc, sorted_token_ids,
+            expert_desc.desc, expert_ids,
+            ntp_desc.desc, num_tokens_post_padded,
+            invoke_desc,
+            &need_ws));
+        if (need_ws > cudnn_ws_cap) {
+            return INFINI_STATUS_INSUFFICIENT_WORKSPACE;
+        }
+        CHECK_CUDNN(cudnnInvokeFusedMoeKernelV3(
+            handle,
+            a_desc.desc, hidden_states,
+            b_desc.desc, w13,
+            c_desc.desc, cache1,
+            nullptr, nullptr,
+            nullptr, nullptr,
+            tw_desc.desc, topk_weights,
+            ti_desc.desc, topk_ids,
+            sorted_desc.desc, sorted_token_ids,
+            expert_desc.desc, expert_ids,
+            ntp_desc.desc, num_tokens_post_padded,
+            nullptr, nullptr,
+            invoke_desc,
+            cudnn_ws, need_ws));
+
+        const int act_rows = m * topk;
+        swiglu_kernel<T><<<(act_rows * inter + 255) / 256, 256, 0, stream>>>(
+            cache1, cache2, act_rows, inter);
+
+        // Stage 2: vLLM passes top_k=1 but keeps C.shape[0]==M (not M*topk).
+        // A is flattened [M*topk, inter]; C stays [M, topk, H] (viewed as
+        // [M*topk, 1, H] inside the torch binding via C.view(-1, 1, H)).
+        CHECK_CUDNN(cudnnSetInvokeFusedMoeDescriptor(
+            invoke_desc,
+            /*topk=*/1,
+            block_size_m,
+            block_size_n,
+            block_size_k,
+            CUDNN_INVOKE_FUSED_MOE_NO_DEQUANT,
+            /*has_zp=*/false,
+            /*has_bias=*/false,
+            /*mul_routed_weight=*/true,
+            block_shape_ptr));
+
+        CHECK_STATUS(set_contig_tensor_desc(a_desc.desc, compute_dtype, {act_rows, inter}));
+        CHECK_STATUS(set_contig_tensor_desc(b_desc.desc, compute_dtype, {e, h, inter}));
+        // Describe C as the post-view layout the torch binding uses: [M*topk, 1, H].
+        // Keep M semantics by also providing topk_weights/ids as [M, topk].
+        CHECK_STATUS(set_contig_tensor_desc(c_desc.desc, compute_dtype, {act_rows, 1, h}));
+
+        need_ws = 0;
+        CHECK_CUDNN(cudnnGetInvokeFusedMoeKernelWorkspaceSizeV3(
+            handle,
+            a_desc.desc, cache2,
+            b_desc.desc, w2,
+            c_desc.desc, cache3,
+            nullptr, nullptr,
+            nullptr, nullptr,
+            tw_desc.desc, topk_weights,
+            ti_desc.desc, topk_ids,
+            sorted_desc.desc, sorted_token_ids,
+            expert_desc.desc, expert_ids,
+            ntp_desc.desc, num_tokens_post_padded,
+            invoke_desc,
+            &need_ws));
+        if (need_ws > cudnn_ws_cap) {
+            return INFINI_STATUS_INSUFFICIENT_WORKSPACE;
+        }
+        CHECK_CUDNN(cudnnInvokeFusedMoeKernelV3(
+            handle,
+            a_desc.desc, cache2,
+            b_desc.desc, w2,
+            c_desc.desc, cache3,
+            nullptr, nullptr,
+            nullptr, nullptr,
+            tw_desc.desc, topk_weights,
+            ti_desc.desc, topk_ids,
+            sorted_desc.desc, sorted_token_ids,
+            expert_desc.desc, expert_ids,
+            ntp_desc.desc, num_tokens_post_padded,
+            nullptr, nullptr,
+            invoke_desc,
+            cudnn_ws, need_ws));
+
+        moe_sum_general_kernel<T><<<m, std::min(h, 1024), 0, stream>>>(
+            cache3, reinterpret_cast<T *>(output), m, topk, h);
+        return INFINI_STATUS_SUCCESS;
+    });
+}
+
+#endif // ENABLE_QY_API && ENABLE_CUDNN_API
+
 template <typename T, typename CutlassT>
 infiniStatus_t calculate_typed(const MoeFusedDenseInfo &info,
                                void *workspace,
@@ -697,6 +969,17 @@ infiniStatus_t Descriptor::calculate(
             _info, workspace, workspace_size, output, hidden_states, w13, w2,
             topk_weights, topk_ids, sorted_token_ids, expert_ids, num_tokens_post_padded,
             cuda_stream);
+#elif defined(ENABLE_QY_API) && defined(ENABLE_CUDNN_API)
+    case INFINI_DTYPE_F16:
+        return calculate_qy_cudnn<half>(
+            _info, workspace, workspace_size, output, hidden_states, w13, w2,
+            topk_weights, topk_ids, sorted_token_ids, expert_ids, num_tokens_post_padded,
+            _opaque->internal.get(), cuda_stream);
+    case INFINI_DTYPE_BF16:
+        return calculate_qy_cudnn<__nv_bfloat16>(
+            _info, workspace, workspace_size, output, hidden_states, w13, w2,
+            topk_weights, topk_ids, sorted_token_ids, expert_ids, num_tokens_post_padded,
+            _opaque->internal.get(), cuda_stream);
 #else
     case INFINI_DTYPE_F16:
     case INFINI_DTYPE_BF16:
