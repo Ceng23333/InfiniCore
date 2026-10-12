@@ -37,11 +37,11 @@ end
 
 local QY_ROOT = os.getenv("QY_ROOT") or os.getenv("QY_HOME") or os.getenv("QY_PATH")
 if QY_ROOT ~= nil then
-    add_includedirs(QY_ROOT .. "sdk/include")
-    add_linkdirs(QY_ROOT .. "/sdk/lib")
+    add_includedirs(path.join(QY_ROOT, "sdk", "include"), {public = true})
+    add_linkdirs(path.join(QY_ROOT, "sdk", "lib"), {public = true})
 end
 
-add_links("curt", "cublas", "cublasLt", "cudnn")
+add_links("curt", "cublas", "cublasLt", "cudnn", {public = true})
 set_languages("cxx17")
 add_cxxflags("-std=c++17")  -- 显式设置 C++17
 add_cuflags("--std=c++17",{force = true})  -- 确保 CUDA 编译器也使用 C++17
@@ -52,11 +52,8 @@ rule("ignore.o")
 rule("qy.cuda")
     set_extensions(".cu")
 
-    -- 缓存所有 .o 文件路径
-    local qy_objfiles = {}
-
     on_load(function (target)
-        target:add("includedirs", QY_ROOT .. "/sdk/include")
+        target:add("includedirs", path.join(QY_ROOT, "sdk", "include"), {public = true})
     end)
 
     after_load(function (target)
@@ -71,31 +68,16 @@ rule("qy.cuda")
         target:set("syslinks", filtered)
     end)
 
-    on_buildcmd_file(function (target, batchcmds, sourcefile, opt)
-        import("core.project.project")
-        import("core.project.config")
-        import("core.base.option")
+    on_build_file(function (target, sourcefile, opt)
+        import("core.project.depend")
+        import("utils.progress")
 
         local dlcc = QY_ROOT .. "/sdk/bin/dlcc"
         local sdk_path = QY_ROOT .. "/sdk"
         local arch = "dlgput64"
-
-        
         local relpath = path.relative(sourcefile, os.projectdir())
-
         relpath = relpath:gsub("%.%.", "__")
-
-        local objfile = path.join(
-            config.buildir(),
-            ".objs",
-            target:name(),
-            "rules",
-            "qy.cuda",
-            relpath .. ".o"
-        )
-
-        target:add("objectfiles", objfile)
-        target:set("buildadd", true)
+        local objfile = target:objectfile(sourcefile)
         local argv = {
             "-c", sourcefile,
             "-o", objfile,
@@ -111,9 +93,19 @@ rule("qy.cuda")
             table.insert(argv, "-D" .. def)
         end
 
-        batchcmds:mkdir(path.directory(objfile))
-        batchcmds:show_progress(opt.progress, "${color.build.object}compiling.dlcu %s", relpath)
-        batchcmds:vrunv(dlcc, argv)
+        table.insert(target:objectfiles(), objfile)
+
+        depend.on_changed(function ()
+            os.mkdir(path.directory(objfile))
+            progress.show(opt.progress, "${color.build.object}compiling.dlcu %s", relpath)
+            os.vrunv(dlcc, argv)
+        end, {
+            dependfile = target:dependfile(objfile),
+            lastmtime = os.mtime(objfile),
+            changed = target:is_rebuilt(),
+            values = {dlcc, argv},
+            files = {sourcefile}
+        })
     end)
 target("infiniop-qy")
     set_kind("static")
